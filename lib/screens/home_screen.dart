@@ -1,23 +1,23 @@
 import 'dart:async';
-import 'dart:io'; 
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart'; 
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:easy_localization/easy_localization.dart';
-import 'package:camera/camera.dart'; 
-import 'package:shared_preferences/shared_preferences.dart'; // 📦 必需
-import '../widgets/custom_profile_camera.dart'; 
+import 'package:camera/camera.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // 📦 Required for caching
+import '../widgets/custom_profile_camera.dart';
 import 'camera_screen.dart';
-import 'attendance_screen.dart'; 
+import 'attendance_screen.dart';
 import 'settings_screen.dart';
 import 'profile_screen.dart';
-import 'leave_application_screen.dart'; 
-import 'payslip_screen.dart'; 
+import 'leave_application_screen.dart';
+import 'payslip_screen.dart';
 
 import '../services/tracking_service.dart';
-import '../services/notification_service.dart'; 
-import '../services/biometric_service.dart'; // 📦 必需
+import '../services/notification_service.dart';
+import '../services/biometric_service.dart'; // 📦 Required for biometric check
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -27,28 +27,28 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // 移除 with WidgetsBindingObserver (因为不再处理锁屏)
-  
+  // Removed WidgetsBindingObserver (BiometricGuard now handles lock screen)
+
   String _staffName = "Staff";
-  String? _faceIdPhotoPath; 
-  
+  String? _faceIdPhotoPath;
+
   StreamSubscription? _leaveSubscription;
   StreamSubscription? _profileSubscription;
 
   @override
   void initState() {
     super.initState();
-    // 1. 加载数据
+    // 1. Load User Data
     _loadUserData();
-    
-    // 2. 启动通知监听
+
+    // 2. Start Notification Listeners
     _listenForAdminUpdates();
 
-    // 3. 🟢 新增：检查是否需要引导开启生物识别
-    // (延迟一点执行，避免和页面渲染冲突)
+    // 3. 🟢 New: Check if biometric setup is needed
+    // (Delayed slightly to avoid conflict with initial rendering)
     Future.delayed(const Duration(seconds: 1), _checkBiometricSetup);
 
-    // 4. GPS 追踪恢复
+    // 4. Resume GPS Tracking
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkAndResumeTracking();
     });
@@ -61,51 +61,51 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  // 🟢 核心逻辑：首次登录询问是否开启生物识别
+  // 🟢 Core Logic: Ask to enable biometrics on first login
   Future<void> _checkBiometricSetup() async {
     final prefs = await SharedPreferences.getInstance();
-    
-    // 检查标记位
-    bool hasAsked = prefs.getBool('has_asked_biometrics') ?? false; // 是否已经问过
-    bool isEnabled = prefs.getBool('biometric_enabled') ?? false;   // 是否已经开启
 
-    // 如果已经开启，或者已经拒绝过(hasAsked=true)，则不再打扰
+    // Check flags
+    bool hasAsked = prefs.getBool('has_asked_biometrics') ?? false; // Has asked before?
+    bool isEnabled = prefs.getBool('biometric_enabled') ?? false;   // Is already enabled?
+
+    // If enabled or already asked (and rejected), do not disturb
     if (hasAsked || isEnabled) return;
 
-    // 检查设备硬件是否支持
+    // Check hardware support
     bool isHardwareSupported = await BiometricService().isDeviceSupported();
-    if (!isHardwareSupported) return; // 设备不支持就不问了
+    if (!isHardwareSupported) return; // Skip if device not supported
 
     if (!mounted) return;
 
-    // 弹出询问对话框
+    // Show dialog
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        title: Text('settings.biometric_lock'.tr()), 
+        title: Text('settings.biometric_lock'.tr()),
         content: Text('login.ask_biometric_desc'.tr()), // "Use Fingerprint/Face ID for faster login..."
         actions: [
           TextButton(
             onPressed: () async {
-              // 用户选择“不需要” -> 记录已询问，以后不再弹窗
+              // User chose "Later" -> Mark as asked
               await prefs.setBool('has_asked_biometrics', true);
               if (ctx.mounted) Navigator.pop(ctx);
             },
-            child: Text('login.btn_later'.tr(), style: const TextStyle(color: Colors.grey)), 
+            child: Text('login.btn_later'.tr(), style: const TextStyle(color: Colors.grey)),
           ),
           ElevatedButton(
             onPressed: () async {
-              Navigator.pop(ctx); // 关闭弹窗，开始验证
-              
-              // 立即验证一次，确保是本人操作
+              Navigator.pop(ctx); // Close dialog, start auth
+
+              // Verify identity immediately
               bool success = await BiometricService().authenticateStaff();
-              
+
               if (success) {
-                // 验证成功 -> 开启功能并记录
+                // Verification success -> Enable feature and save
                 await prefs.setBool('biometric_enabled', true);
                 await prefs.setBool('has_asked_biometrics', true);
-                
+
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text('settings.biometric_on_msg'.tr()), backgroundColor: Colors.green)
@@ -113,14 +113,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 }
               }
             },
-            child: Text('login.btn_enable'.tr()), 
+            child: Text('login.btn_enable'.tr()),
           ),
         ],
       ),
     );
   }
 
-  // ---------------- 以下保持原有逻辑不变 ----------------
+  // ---------------- Existing Logic Below ----------------
 
   void _listenForAdminUpdates() {
     final user = FirebaseAuth.instance.currentUser;
@@ -136,10 +136,10 @@ class _HomeScreenState extends State<HomeScreen> {
           final data = change.doc.data();
           final status = data?['status'];
           final type = data?['type'] ?? 'Leave';
-          
+
           if (status == 'Approved' || status == 'Rejected') {
             NotificationService().showStatusNotification(
-              'Leave Update', 
+              'Leave Update',
               'Your $type application has been $status.'
             );
           }
@@ -149,18 +149,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _profileSubscription = FirebaseFirestore.instance
         .collection('edit_requests')
-        .where('userId', isEqualTo: user.uid) 
+        .where('userId', isEqualTo: user.uid)
         .snapshots()
         .listen((snapshot) {
       for (var change in snapshot.docChanges) {
         if (change.type == DocumentChangeType.modified) {
           final data = change.doc.data();
           final status = data?['status'];
-          
+
           if (status == 'approved' || status == 'rejected') {
              String displayStatus = status == 'approved' ? 'Approved' : 'Rejected';
              NotificationService().showStatusNotification(
-              'Profile Update Request', 
+              'Profile Update Request',
               'Your request to update profile has been $displayStatus.'
             );
           }
@@ -183,13 +183,13 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final querySnapshot = await FirebaseFirestore.instance
           .collection('users')
-          .where('authUid', isEqualTo: user.uid) 
+          .where('authUid', isEqualTo: user.uid)
           .limit(1)
           .get();
 
       if (querySnapshot.docs.isNotEmpty) {
         final data = querySnapshot.docs.first.data();
-        
+
         if (mounted) {
           setState(() {
             final personal = data['personal'] as Map<String, dynamic>?;
@@ -199,8 +199,8 @@ class _HomeScreenState extends State<HomeScreen> {
               } else if (personal['name'] != null) {
                 _staffName = personal['name'];
               }
-              // 🟢 缓存名字 (用于 Biometric Guard 锁屏显示)
-              _cacheUserName(_staffName); 
+              // 🟢 Cache Name (For Biometric Guard Lock Screen)
+              _cacheUserName(_staffName);
             }
 
             if (data['faceIdPhoto'] != null) {
@@ -214,7 +214,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // 辅助：缓存用户名
+  // Helper: Cache User Name
   Future<void> _cacheUserName(String name) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('cached_staff_name', name);
@@ -233,7 +233,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('home.msg_uploading'.tr())) 
+        SnackBar(content: Text('home.msg_uploading'.tr()))
       );
     }
 
@@ -256,7 +256,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (q.docs.isNotEmpty) {
         await q.docs.first.reference.update({
           'faceIdPhoto': downloadUrl,
-          'hasFaceId': true,        
+          'hasFaceId': true,
           'lastFaceUpdate': FieldValue.serverTimestamp(),
         });
 
@@ -266,7 +266,7 @@ class _HomeScreenState extends State<HomeScreen> {
           });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('profile.save_success'.tr()), 
+              content: Text('profile.save_success'.tr()),
               backgroundColor: Colors.green,
             )
           );
@@ -299,7 +299,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: Colors.grey[100],
       appBar: AppBar(
-        title: Text('home.app_title'.tr()), 
+        title: Text('home.app_title'.tr()),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -307,12 +307,12 @@ class _HomeScreenState extends State<HomeScreen> {
           Padding(
             padding: const EdgeInsets.only(right: 8.0),
             child: GestureDetector(
-              onTap: _openCustomCamera, 
+              onTap: _openCustomCamera,
               child: Container(
                 margin: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 2), 
+                  border: Border.all(color: Colors.white, width: 2),
                   boxShadow: [
                     BoxShadow(color: Colors.black.withValues(alpha:0.1), blurRadius: 4)
                   ]
@@ -320,9 +320,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: CircleAvatar(
                   radius: 18,
                   backgroundColor: Colors.blue.shade700,
-                  backgroundImage: profileImage, 
-                  child: profileImage == null 
-                      ? const Icon(Icons.add_a_photo, size: 20, color: Colors.white) 
+                  backgroundImage: profileImage,
+                  child: profileImage == null
+                      ? const Icon(Icons.add_a_photo, size: 20, color: Colors.white)
                       : null,
                 ),
               ),
@@ -352,26 +352,14 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: Row(
               children: [
-                GestureDetector(
-                  onTap: () {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfileScreen()));
-                  },
-                  child: CircleAvatar(
-                    radius: 30,
-                    backgroundColor: Colors.white24,
-                    backgroundImage: profileImage, 
-                    child: profileImage == null 
-                        ? const Icon(Icons.person, size: 35, color: Colors.white) 
-                        : null,
-                  ),
-                ),
+
                 const SizedBox(width: 15),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('home.welcome'.tr(), style: const TextStyle(color: Colors.white70)),
                     Text(
-                      _staffName, 
+                      _staffName,
                       style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)
                     ),
                   ],
@@ -379,7 +367,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          
+
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 20, 24, 10),
             child: Text('home.menu_main'.tr(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -393,75 +381,75 @@ class _HomeScreenState extends State<HomeScreen> {
               mainAxisSpacing: 20,
               children: [
                 _buildMenuCard(
-                  context, 
-                  'home.att_center'.tr(), 
-                  Icons.access_time_filled, 
+                  context,
+                  'home.att_center'.tr(),
+                  Icons.access_time_filled,
                   Colors.orange,
                   isEnabled: true,
                   onTap: () {
                     Navigator.push(
-                      context, 
+                      context,
                       MaterialPageRoute(builder: (context) => const AttendanceScreen())
                     );
                   },
                 ),
 
                 _buildMenuCard(
-                  context, 
-                  'home.apply_leave'.tr(), 
-                  Icons.calendar_month_outlined, 
-                  Colors.green, 
+                  context,
+                  'home.apply_leave'.tr(),
+                  Icons.calendar_month_outlined,
+                  Colors.green,
                   isEnabled: true,
                   onTap: () {
                     Navigator.push(
-                      context, 
+                      context,
                       MaterialPageRoute(builder: (context) => const LeaveApplicationScreen())
                     );
                   },
                 ),
 
                 _buildMenuCard(
-                  context, 
-                  'home.smart_cam'.tr(), 
-                  Icons.camera_alt_outlined, 
+                  context,
+                  'home.smart_cam'.tr(),
+                  Icons.camera_alt_outlined,
                   Colors.blue,
                   isEnabled: true,
                   onTap: () {
                     Navigator.push(
-                      context, 
+                      context,
                       MaterialPageRoute(builder: (context) => const CameraScreen())
                     );
                   },
                 ),
 
                 _buildMenuCard(
-                  context, 
-                  'home.payslip'.tr(), 
-                  Icons.receipt_long, 
+                  context,
+                  'home.payslip'.tr(),
+                  Icons.receipt_long,
                   Colors.pink,
-                  isEnabled: true, 
+                  isEnabled: true,
                   onTap: () {
                     Navigator.push(
-                      context, 
+                      context,
                       MaterialPageRoute(builder: (context) => const PayslipScreen())
                     );
                   },
                 ),
 
                 _buildMenuCard(
-                  context, 
-                  'home.profile'.tr(), 
-                  Icons.person, 
+                  context,
+                  'home.profile'.tr(),
+                  Icons.person,
                   Colors.purple,
-                  isEnabled: true, 
+                  isEnabled: true,
                   onTap: () {
                     Navigator.push(
-                      context, 
+                      context,
                       MaterialPageRoute(builder: (context) => const ProfileScreen())
                     );
                   },
                 ),
-                
+
               ],
             ),
           ),
@@ -475,7 +463,7 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: isEnabled ? onTap : () {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('home.soon'.tr()), 
+            content: Text('home.soon'.tr()),
             duration: const Duration(seconds: 1),
             behavior: SnackBarBehavior.floating,
           ),
@@ -484,16 +472,16 @@ class _HomeScreenState extends State<HomeScreen> {
       borderRadius: BorderRadius.circular(20),
       child: Container(
         decoration: BoxDecoration(
-          color: isEnabled ? Colors.white : Colors.grey[200], 
+          color: isEnabled ? Colors.white : Colors.grey[200],
           borderRadius: BorderRadius.circular(20),
           boxShadow: isEnabled ? [
             BoxShadow(
-              color: Colors.grey.withValues(alpha:0.1), 
-              blurRadius: 10, 
+              color: Colors.grey.withValues(alpha:0.1),
+              blurRadius: 10,
               spreadRadius: 2,
               offset: const Offset(0, 5),
             ),
-          ] : [], 
+          ] : [],
         ),
         child: Stack(
           children: [
@@ -503,7 +491,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Container(
                   padding: const EdgeInsets.all(15),
                   decoration: BoxDecoration(
-                    color: isEnabled ? color.withValues(alpha:0.1) : Colors.grey.withValues(alpha:0.3), 
+                    color: isEnabled ? color.withValues(alpha:0.1) : Colors.grey.withValues(alpha:0.3),
                     shape: BoxShape.circle
                   ),
                   child: Icon(icon, color: isEnabled ? color : Colors.grey, size: 35),
@@ -511,9 +499,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 15),
                 Center(
                   child: Text(
-                    title, 
+                    title,
                     style: TextStyle(
-                      fontWeight: FontWeight.bold, 
+                      fontWeight: FontWeight.bold,
                       fontSize: 15,
                       color: isEnabled ? Colors.black : Colors.grey
                     )
@@ -532,7 +520,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     borderRadius: BorderRadius.circular(10)
                   ),
                   child: Text(
-                    'home.soon'.tr(), 
+                    'home.soon'.tr(),
                     style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)
                   ),
                 ),

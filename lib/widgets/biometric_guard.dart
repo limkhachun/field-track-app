@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:firebase_auth/firebase_auth.dart'; // 需要退出登录
-import 'package:easy_localization/easy_localization.dart'; // 翻译
-import '../services/biometric_service.dart'; // 你的服务
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:easy_localization/easy_localization.dart';
+import '../services/biometric_service.dart';
 
 class BiometricGuard extends StatefulWidget {
   final Widget child;
@@ -17,7 +17,7 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
   bool _isLocked = false; 
   bool _isAuthenticating = false; 
   bool _isEnabled = false; 
-  String _cachedName = ""; // 🟢 缓存的名字
+  String _cachedName = "Staff"; // Default to "Staff"
 
   @override
   void initState() {
@@ -36,13 +36,13 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
     final prefs = await SharedPreferences.getInstance();
     _isEnabled = prefs.getBool('biometric_enabled') ?? false;
     
-    // 🟢 读取缓存的名字
+    // Initial load of cached name
     setState(() {
       _cachedName = prefs.getString('cached_staff_name') ?? "Staff";
     });
 
     final user = FirebaseAuth.instance.currentUser;
-    // 只有已登录且开启了指纹锁才锁定
+    // Only lock if enabled and user is logged in
     if (_isEnabled && user != null) {
       setState(() => _isLocked = true);
       _authenticate();
@@ -73,42 +73,52 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
   }
 
   Future<void> _authenticate() async {
+    // 🟢 KEY CHANGE: Refresh the cached name right before authentication
+    // This ensures that if HomeScreen just fetched the name, we show it here immediately.
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _cachedName = prefs.getString('cached_staff_name') ?? "Staff";
+      });
+    }
+
     _isAuthenticating = true;
     try {
       bool authenticated = await BiometricService().authenticateStaff();
       if (mounted) {
         setState(() {
-          // 验证成功 -> 解锁；失败 -> 保持锁定
+          // Success -> Unlock; Failure -> Keep locked
           if (authenticated) _isLocked = false; 
         });
       }
     } catch (e) {
       debugPrint("Auth error: $e");
     } finally {
+      // Delay slightly to prevent rapid-fire loop if auth fails instantly
       await Future.delayed(const Duration(milliseconds: 500));
       _isAuthenticating = false;
     }
   }
 
-  // 🟢 处理“重新登录”
+  // Handle "Relogin" (Logout)
   Future<void> _handleRelogin() async {
-    // 1. 解锁遮罩 (否则退出后可能还会盖在 LoginScreen 上)
+    // 1. Unlock the guard (otherwise it might cover the LoginScreen)
     setState(() => _isLocked = false);
     
-    // 2. 执行登出
+    // 2. Sign out
     await FirebaseAuth.instance.signOut();
     
-    // main.dart 的 StreamBuilder 会自动感知并跳转到 LoginScreen
+    // The StreamBuilder in main.dart will detect the auth change and show LoginScreen
   }
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // 1. 底层应用
+        // 1. The actual app underneath
         widget.child,
 
-        // 2. 顶层：仿 Info-Tech 锁屏界面
+        // 2. The Lock Screen Overlay
         if (_isLocked)
           Scaffold(
             backgroundColor: Colors.white,
@@ -119,8 +129,7 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
                   children: [
                     const SizedBox(height: 40),
                     
-                    // --- 1. Logo 区域 ---
-                    // 如果有 logo 图片资源: Image.asset('assets/logo.png', height: 60),
+                    // --- 1. Logo Area ---
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                       decoration: BoxDecoration(
@@ -135,25 +144,25 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
 
                     const SizedBox(height: 60),
 
-                    // --- 2. 欢迎语 ---
+                    // --- 2. Welcome Text ---
                     Text(
                       "lock.welcome_back".tr(),
                       style: const TextStyle(fontSize: 18, color: Colors.black54),
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      _cachedName.toUpperCase(),
+                      _cachedName.toUpperCase(), // Displays the fresh cached name
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                         fontSize: 26, 
                         fontWeight: FontWeight.bold, 
-                        color: Color(0xFF15438c) // 深蓝色
+                        color: Color(0xFF15438c)
                       ),
                     ),
 
                     const Spacer(), 
 
-                    // --- 3. 指纹图标区域 ---
+                    // --- 3. Fingerprint Icon ---
                     Text(
                       "lock.verify_identity".tr(),
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87),
@@ -161,7 +170,7 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
                     const SizedBox(height: 20),
                     
                     GestureDetector(
-                      onTap: _authenticate, // 点击图标再次触发验证
+                      onTap: _authenticate, // Tap to retry
                       child: Container(
                         padding: const EdgeInsets.all(20),
                         decoration: BoxDecoration(
@@ -184,7 +193,7 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
 
                     const Spacer(),
 
-                    // --- 4. 重新登陆按钮 ---
+                    // --- 4. Relogin Button ---
                     TextButton(
                       onPressed: _handleRelogin,
                       child: Text(
@@ -195,7 +204,7 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
 
                     const SizedBox(height: 30),
 
-                    // --- 5. 底部版权文字 ---
+                    // --- 5. Footer ---
                     Text(
                       "Version 1.0.0",
                       style: TextStyle(color: Colors.blue.shade800, fontWeight: FontWeight.bold),
@@ -209,7 +218,7 @@ class _BiometricGuardState extends State<BiometricGuard> with WidgetsBindingObse
                       children: [
                         Text("lock.footer_text".tr(), style: const TextStyle(fontSize: 11, color: Colors.black54), textAlign: TextAlign.center),
                         GestureDetector(
-                          onTap: () {}, // 可以在此添加跳转隐私政策的逻辑
+                          onTap: () {}, 
                           child: Text("lock.privacy".tr(), style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.bold)),
                         ),
                         const Text("&", style: TextStyle(fontSize: 11, color: Colors.black54)),

@@ -9,10 +9,13 @@ import 'package:geocoding/geocoding.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:camera/camera.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:http/http.dart' as http; 
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
-import '../widgets/face_camera_view.dart'; 
-import 'correction_request_screen.dart'; 
+// 📦 NEW: Required for WiFi Name & BSSID check
+import 'package:network_info_plus/network_info_plus.dart'; 
+
+import '../widgets/face_camera_view.dart';
+import 'correction_request_screen.dart';
 import '../services/tracking_service.dart';
 
 class AttendanceScreen extends StatefulWidget {
@@ -40,7 +43,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           .where('authUid', isEqualTo: user.uid)
           .limit(1)
           .get();
-      
+
       if (q.docs.isNotEmpty && mounted) {
         final data = q.docs.first.data();
         final faceUrl = data['faceIdPhoto']?.toString();
@@ -102,9 +105,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           color: Colors.white,
           child: SafeArea(
             child: TabBar(
-              labelColor: const Color(0xFF15438c), 
-              unselectedLabelColor: Colors.black, 
-              indicatorColor: const Color(0xFF15438c), 
+              labelColor: const Color(0xFF15438c),
+              unselectedLabelColor: Colors.black,
+              indicatorColor: const Color(0xFF15438c),
               indicatorSize: TabBarIndicatorSize.tab,
               tabs: [
                 Tab(icon: const Icon(Icons.touch_app), text: "att.tab_clock_in".tr()),
@@ -121,7 +124,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 }
 
 // ==========================================
-//  Tab 1: Action Tab
+//  Tab 1: Action Tab (Modified for Security)
 // ==========================================
 
 class AttendanceActionTab extends StatefulWidget {
@@ -134,7 +137,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
   bool _isLoading = false;
   String _staffName = "Staff";
   String _employeeId = "";
-  // 🟢 修复 1: 移除了未使用的 _userDocId
   
   String _currentAddress = "att.locating".tr();
   Timer? _timer;
@@ -173,7 +175,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         final data = q.docs.first.data();
         
         setState(() {
-          // 🟢 修复 1: 不再赋值 _userDocId
           _staffName = data['personal']['name'] ?? "Staff";
           if (data['personal'] != null && data['personal']['empCode'] != null) {
             _employeeId = "(${data['personal']['empCode']})";
@@ -228,14 +229,34 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     }
   }
 
+  // 🟢 MODIFICATION 1: Enhanced Address Detail
   Future<void> _getAddressFromLatLng(Position position) async {
     try {
       List<Placemark> placemarks =
           await placemarkFromCoordinates(position.latitude, position.longitude);
+      
       if (placemarks.isNotEmpty && mounted) {
         Placemark place = placemarks[0];
-        setState(() => _currentAddress =
-            "${place.street}, ${place.postalCode} ${place.locality}, ${place.administrativeArea}, ${place.country}");
+        
+        // Construct a highly detailed address string
+        List<String> parts = [
+          place.name ?? "",
+          place.subThoroughfare ?? "", // House Number
+          place.thoroughfare ?? "",    // Street
+          place.subLocality ?? "",     // Area/Taman
+          place.locality ?? "",        // City/Town
+          place.postalCode ?? "",
+          place.administrativeArea ?? "", // State
+          place.country ?? ""
+        ];
+
+        // Filter out empty strings and duplicates, then join
+        String detailedAddress = parts
+            .where((p) => p.isNotEmpty)
+            .toSet() // Remove simple duplicates
+            .join(", ");
+
+        setState(() => _currentAddress = detailedAddress);
       }
     } catch (e) {
       if (mounted) {
@@ -256,6 +277,109 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     return await Geolocator.getCurrentPosition(
         locationSettings:
             const LocationSettings(accuracy: LocationAccuracy.high));
+  }
+
+  // 🟢 MODIFICATION 2: Security Validation (WiFi BSSID + GPS Radius)
+  Future<bool> _validateRestrictions() async {
+    setState(() => _isLoading = true);
+    
+    try {
+      // 1. Fetch Office Settings from Firestore
+      final doc = await FirebaseFirestore.instance.collection('settings').doc('office_location').get();
+      if (!doc.exists) throw "Office location settings not found in database.";
+      
+      final data = doc.data() as Map<String, dynamic>;
+      final double officeLat = (data['latitude'] as num).toDouble();
+      final double officeLng = (data['longitude'] as num).toDouble();
+      final double allowedRadius = (data['radius'] as num?)?.toDouble() ?? 500.0;
+
+      // Parse WiFi List (Support object array [{ssid:..., bssid:...}])
+      List<Map<String, String>> allowedWifiList = [];
+      if (data['allowedWifis'] is List) {
+        for (var item in data['allowedWifis']) {
+          if (item is String) {
+            allowedWifiList.add({'ssid': item, 'bssid': ''});
+          } else if (item is Map) {
+            allowedWifiList.add({
+              'ssid': item['ssid']?.toString() ?? '',
+              'bssid': item['bssid']?.toString().toLowerCase() ?? ''
+            });
+          }
+        }
+      } else if (data['wifiSSID'] is String) {
+        allowedWifiList.add({'ssid': data['wifiSSID'], 'bssid': ''});
+      }
+
+      // 2. Perform WiFi Check
+      if (allowedWifiList.isNotEmpty) {
+        final info = NetworkInfo();
+        String? currentSSID = await info.getWifiName();
+        String? currentBSSID = await info.getWifiBSSID(); // Needs Location/WiFi Access permission
+
+        // Cleanup strings
+        if (currentSSID != null) currentSSID = currentSSID.replaceAll('"', '');
+        if (currentBSSID != null) currentBSSID = currentBSSID.toLowerCase();
+
+        // Handle Android 12+ privacy masking
+        if (currentBSSID == "02:00:00:00:00:00") currentBSSID = null;
+
+        bool isWifiValid = false;
+        for (var config in allowedWifiList) {
+          bool ssidMatch = config['ssid'] == currentSSID;
+          
+          bool bssidMatch = true;
+          // Only enforce BSSID check if it's configured in the allowed list
+          if (config['bssid'] != null && config['bssid']!.isNotEmpty) {
+             if (currentBSSID == null) {
+               throw "Security Check Failed: Cannot read router MAC address (BSSID).\nPlease enable GPS & Precise Location permissions.";
+             }
+             bssidMatch = config['bssid'] == currentBSSID;
+          }
+
+          if (ssidMatch && bssidMatch) {
+            isWifiValid = true;
+            break;
+          }
+        }
+
+        if (!isWifiValid) {
+           throw "WiFi Validation Failed.\n\nYour Connection:\nSSID: ${currentSSID ?? 'Unknown'}\nBSSID: ${currentBSSID ?? 'Unknown'}\n\nPlease connect to the verified company WiFi.";
+        }
+      }
+
+      // 3. Perform GPS Radius Check
+      Position? currentPos = await _determinePosition();
+      if (currentPos == null) throw "Cannot determine GPS location.";
+
+      double distanceInMeters = Geolocator.distanceBetween(
+        currentPos.latitude,
+        currentPos.longitude,
+        officeLat,
+        officeLng,
+      );
+
+      if (distanceInMeters > allowedRadius) {
+        throw "You are too far from the office.\nDistance: ${distanceInMeters.toStringAsFixed(0)}m\nAllowed: ${allowedRadius.toInt()}m";
+      }
+
+      // If we are here, all checks passed
+      return true;
+
+    } catch (e) {
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text("Access Denied"),
+            content: Text(e.toString()),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK"))],
+          ),
+        );
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   Future<void> _showActionPicker() async {
@@ -376,8 +500,15 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     );
   }
 
-  void _handleAction(String action) {
-    Navigator.pop(context);
+  // 🟢 Modified Handle Action to include Validation
+  void _handleAction(String action) async {
+    Navigator.pop(context); // Close sheet
+
+    // 1. Run Security Checks
+    bool isAllowed = await _validateRestrictions();
+    if (!isAllowed) return; // Stop if failed
+
+    // 2. Proceed if Allowed
     setState(() => _selectedAction = action);
     _takePhoto(); 
   }
@@ -502,8 +633,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       if (mounted) setState(() => _isLoading = false);
     }
   }
-
-  // 🟢 修复 2 & 3: 移除了未使用的 _formatDuration 和 _buildTimeBox
 
   @override
   Widget build(BuildContext context) {
@@ -678,7 +807,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
 }
 
 // ==========================================
-//  Tab 2: History (Localized)
+//  Tab 2: History (No Changes)
 // ==========================================
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key});
@@ -816,7 +945,7 @@ class _HistoryTabState extends State<HistoryTab> {
 }
 
 // ==========================================
-//  Tab 3: Schedule (Localized)
+//  Tab 3: Schedule (No Changes)
 // ==========================================
 
 class ScheduleTab extends StatefulWidget {
@@ -944,7 +1073,7 @@ class _ScheduleTabState extends State<ScheduleTab> {
                            status = "Working";
                            statusColor = Colors.blue;
                            if (schedStart != null && ts.isAfter(schedStart)) {
-                              lateStr = _formatDuration(ts.difference(schedStart));
+                             lateStr = _formatDuration(ts.difference(schedStart));
                            }
                         }
 
@@ -955,11 +1084,11 @@ class _ScheduleTabState extends State<ScheduleTab> {
                            statusColor = Colors.green;
                           if (schedEnd != null) {
                            if (ts.isAfter(schedEnd)) {
-                              otStr = _formatDuration(ts.difference(schedEnd));
+                             otStr = _formatDuration(ts.difference(schedEnd));
                            } else {
-                              underStr = _formatDuration(schedEnd.difference(ts));
+                             underStr = _formatDuration(schedEnd.difference(ts));
                            }
-                        }
+                         }
                         } else if (breakOutDoc != null) {
                            final ts = ((breakOutDoc.data() as Map<String,dynamic>)['timestamp'] as Timestamp).toDate();
                            timeOut = DateFormat('HH:mm').format(ts);
@@ -1079,7 +1208,7 @@ class _ScheduleTabState extends State<ScheduleTab> {
 }
 
 // ==========================================
-//  Tab 4: Submit (Correction & Logs)
+//  Tab 4: Submit (Modified: Limit Date to Today)
 // ==========================================
 
 class SubmitTab extends StatefulWidget {
@@ -1122,10 +1251,23 @@ class _SubmitTabState extends State<SubmitTab> {
     if (_myEmpCode == null) return Center(child: Text("att.err_profile_not_linked".tr()));
 
     final user = FirebaseAuth.instance.currentUser;
-    final endDate = _currentStartDate.add(const Duration(days: 6));
+    final now = DateTime.now();
+    
+    // 🟢 MODIFICATION 3: Limit End Date to Today
+    final originalEndDate = _currentStartDate.add(const Duration(days: 6));
+    final endOfToday = DateTime(now.year, now.month, now.day, 23, 59, 59);
+    
+    // Use the earlier of the two dates (end of week OR today)
+    DateTime effectiveEndDate = originalEndDate.isAfter(endOfToday) ? endOfToday : originalEndDate;
+    
     final startStr = DateFormat('yyyy-MM-dd').format(_currentStartDate);
-    final endStr = DateFormat('yyyy-MM-dd').format(endDate);
-    final displayRange = "${DateFormat('dd MMM').format(_currentStartDate)} - ${DateFormat('dd MMM').format(endDate)}";
+    final endStr = DateFormat('yyyy-MM-dd').format(effectiveEndDate);
+    
+    // Header keeps showing the full week for navigation clarity
+    final displayRange = "${DateFormat('dd MMM').format(_currentStartDate)} - ${DateFormat('dd MMM').format(originalEndDate)}";
+    
+    // If user scrolled to future week, don't show list
+    bool isFutureWeek = _currentStartDate.isAfter(endOfToday);
 
     return Column(
       children: [
@@ -1148,11 +1290,13 @@ class _SubmitTabState extends State<SubmitTab> {
         ),
         
         Expanded(
-          child: StreamBuilder<QuerySnapshot>(
+          child: isFutureWeek 
+            ? Center(child: Text("att.no_shifts".tr(), style: const TextStyle(color: Colors.grey))) 
+            : StreamBuilder<QuerySnapshot>(
             stream: FirebaseFirestore.instance.collection('schedules')
                 .where('userId', isEqualTo: _myEmpCode)
                 .where('date', isGreaterThanOrEqualTo: startStr)
-                .where('date', isLessThanOrEqualTo: endStr)
+                .where('date', isLessThanOrEqualTo: endStr) // 🟢 Restricted Date
                 .orderBy('date')
                 .snapshots(),
             builder: (context, snapshot) {
@@ -1251,7 +1395,7 @@ class _SubmitTabState extends State<SubmitTab> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text("${'att.label_shift'.tr()} ($shiftStart - $shiftEnd)", style: const TextStyle(color: Color(0xFF15438c), fontWeight: FontWeight.bold, fontSize: 15)), // 🟢 修复 4: 补上 {}
+                  Text("${'att.label_shift'.tr()} ($shiftStart - $shiftEnd)", style: const TextStyle(color: Color(0xFF15438c), fontWeight: FontWeight.bold, fontSize: 15)), 
                   Text("$weekDay ($fmtDate)", style: const TextStyle(color: Colors.blueGrey, fontSize: 13)),
                 ],
               ),
