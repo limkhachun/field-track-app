@@ -22,18 +22,18 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
   CameraController? _controller;
   bool _isInitialized = false;
 
-  // --- UI 状态 ---
+  // --- UI Status ---
   String _statusText = "";
   Color _statusColor = Colors.white;
   bool _isLoadingReference = true;
   
-  // --- 流程控制状态 ---
-  // 0: 寻找人脸, 1: 请眨眼(活体), 2: 正在验证/拍照
+  // --- Flow Control ---
+  // 0: Find Face, 1: Blink (Liveness), 2: Verifying/Capturing
   int _step = 0; 
-  bool _eyesPreviouslyClosed = false; // 记录上一帧是否闭眼
-  bool _hasCaptured = false; // 锁定防止重复提交
+  bool _eyesPreviouslyClosed = false; 
+  bool _hasCaptured = false; 
 
-  // --- 逻辑对象 ---
+  // --- Logic ---
   late final FaceDetector _faceDetector;
   bool _isProcessing = false;
   final FaceRecognitionService _faceService = FaceRecognitionService();
@@ -44,23 +44,22 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
     WidgetsBinding.instance.addObserver(this);
     _statusText = 'camera.align'.tr(); 
 
-    // 1. 初始化人脸检测器 (必须开启 classification 以检测眨眼)
+    // 1. Initialize Face Detector
     _faceDetector = FaceDetector(
       options: FaceDetectorOptions(
-        performanceMode: FaceDetectorMode.accurate,
+        performanceMode: FaceDetectorMode.accurate, // Consider 'fast' if still slow on older devices
         enableLandmarks: true,
-        enableClassification: true, // 🟢 关键：必须为 true
+        enableClassification: true, 
         enableContours: false,
-        minFaceSize: 0.15,
+        minFaceSize: 0.15, // Keep at 0.15 to avoid detecting faces too far away
       ),
     );
 
-    // 2. 并行初始化：下载参考图 & 启动相机
+    // 2. Parallel Init: Download Ref & Start Camera
     _downloadAndInitializeReference();
     _initializeCamera();
   }
 
-  // 下载参考图片（处理网络图片）
   Future<void> _downloadAndInitializeReference() async {
     await _faceService.initialize();
     
@@ -126,7 +125,7 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
     _controller!.startImageStream(_processImage);
   }
 
-  // --- 实时图像处理 ---
+  // --- Real-time Processing ---
   Future<void> _processImage(CameraImage image) async {
     if (_isLoadingReference || _isProcessing || _hasCaptured || !mounted) return;
     _isProcessing = true;
@@ -145,18 +144,19 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
       } else {
         final face = faces.first;
         
-        // 1. 检查是否居中 (可选)
+        // 🟢 RELAXED CENTERING LOGIC
         bool isCentered = _isFaceCentered(face, image.width, image.height);
+        
         if (!isCentered) {
+          // If the face is way off, ask to center.
+          // But now "Centered" allows a much wider area.
           _updateUI(status: 'camera.center_face'.tr(), color: Colors.orange, step: 0);
           _eyesPreviouslyClosed = false;
         } else {
-          // 2. 居中后，进入活体检测流程
+          // 2. Face is valid, check liveness
           if (_step == 0) {
-            // 提示眨眼
-            _updateUI(status: "请眨眼\nPlease BLINK", color: Colors.yellowAccent, step: 1);
+            _updateUI(status: "Please Blink\nSila Kelip Mata", color: Colors.yellowAccent, step: 1);
           } else if (_step == 1) {
-            // 检测眨眼动作
             _checkBlinkLiveness(face);
           }
         }
@@ -168,26 +168,41 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
     }
   }
 
-  // --- 🟢 活体检测核心逻辑 ---
+  // 🟢 Modified Check: Relaxed Boundaries
+  bool _isFaceCentered(Face face, int imgWidth, int imgHeight) {
+    double centerX = face.boundingBox.center.dx;
+    double centerY = face.boundingBox.center.dy;
+
+    // Previous Strict: 0.2 - 0.8
+    // New Relaxed: 0.1 - 0.9 (Allow face almost anywhere except edges)
+    // Also ensuring face is large enough (width > 15% of image)
+    
+    bool xOk = centerX > imgWidth * 0.1 && centerX < imgWidth * 0.9;
+    bool yOk = centerY > imgHeight * 0.1 && centerY < imgHeight * 0.9;
+    
+    // Optional: Ensure face isn't too small (too far away)
+    // bool sizeOk = face.boundingBox.width > imgWidth * 0.25; 
+
+    return xOk && yOk; // && sizeOk;
+  }
+
   void _checkBlinkLiveness(Face face) {
     final leftOpen = face.leftEyeOpenProbability;
     final rightOpen = face.rightEyeOpenProbability;
 
     if (leftOpen == null || rightOpen == null) return;
 
-    // 阈值：< 0.2 闭眼，> 0.8 睁眼
+    // Thresholds: < 0.2 Closed, > 0.5 Open (Lowered open threshold for faster detection)
     bool isClosed = (leftOpen < 0.2 && rightOpen < 0.2);
-    bool isOpen = (leftOpen > 0.8 && rightOpen > 0.8);
+    bool isOpen = (leftOpen > 0.5 && rightOpen > 0.5);
 
     if (isClosed) {
-      _eyesPreviouslyClosed = true; // 捕捉到闭眼
+      _eyesPreviouslyClosed = true; 
     } else if (isOpen && _eyesPreviouslyClosed) {
-      // 捕捉到 闭眼 -> 睁眼，通过！
       _captureAndVerify();
     }
   }
 
-  // --- 拍照并验证 ---
   Future<void> _captureAndVerify() async {
     if (_hasCaptured) return;
     
@@ -200,28 +215,20 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
 
     try {
       await _controller!.stopImageStream();
-      
-      // 拍照
       final XFile image = await _controller!.takePicture();
 
-      // 如果没有参考图（比如是录入模式），直接返回
       if (widget.referencePath == null) {
         if (mounted) Navigator.pop(context, image);
         return;
       }
 
-      // 进行比对
-      // 注意：这里假设您的 FaceService 有 compareFacesDetailed 方法
-      // 如果没有，请替换为您现有的比对逻辑
       VerifyResult result = await _faceService.compareFacesDetailed(widget.referencePath!, image);
 
       if (!mounted) return;
 
       if (result.verified) {
-        // 验证成功
         Navigator.pop(context, image);
       } else {
-        // 验证失败
         setState(() {
           _statusText = 'camera.failed'.tr();
           _statusColor = Colors.red;
@@ -241,7 +248,7 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
       barrierDismissible: false,
       builder: (context) => AlertDialog(
         title: Text('camera.failed'.tr()),
-        content: const Text("Face verification failed. Ensure good lighting."),
+        content: const Text("Face mismatch. Please try again in better lighting."),
         actions: [
           ElevatedButton(
             onPressed: () {
@@ -266,13 +273,11 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
     });
     
     if (_controller != null) {
-      // 重新启动流
       await _controller!.startImageStream(_processImage);
     }
   }
 
   void _updateUI({required String status, required Color color, required int step}) {
-    // 只有状态改变时才刷新 UI，减少 rebuild
     if (_statusText != status || _statusColor != color || _step != step) {
       if (mounted) {
         setState(() {
@@ -284,21 +289,12 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
     }
   }
 
-  bool _isFaceCentered(Face face, int imgWidth, int imgHeight) {
-    double centerX = face.boundingBox.center.dx;
-    double centerY = face.boundingBox.center.dy;
-    // 宽松一点的中心判定
-    return centerX > imgWidth * 0.2 && centerX < imgWidth * 0.8 &&
-           centerY > imgHeight * 0.2 && centerY < imgHeight * 0.8;
-  }
-
   InputImage? _convertCameraImage(CameraImage image) {
     if (_controller == null) return null;
     try {
       final camera = _controller!.description;
       final sensorOrientation = camera.sensorOrientation;
       
-      // 处理旋转 (简略版，涵盖大多数情况)
       InputImageRotation rotation = InputImageRotation.rotation0deg;
       if (Platform.isAndroid) {
         rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation270deg;
@@ -352,9 +348,8 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
     }
 
     final size = MediaQuery.of(context).size;
-    // 🟢 定义长方形取景框尺寸
     final double rectWidth = size.width * 0.8;
-    final double rectHeight = size.width * 1.1; // 稍微高一点的长方形
+    final double rectHeight = size.width * 1.1; 
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -368,7 +363,6 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
         children: [
           CameraPreview(_controller!),
           
-          // 🟢 遮罩层 + 长方形透明框
           ColorFiltered(
             colorFilter: ColorFilter.mode(Colors.black.withValues(alpha:0.5), BlendMode.srcOut),
             child: Stack(
@@ -385,7 +379,6 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
                     height: rectHeight,
                     decoration: BoxDecoration(
                       color: Colors.white,
-                      // 长方形圆角
                       borderRadius: BorderRadius.circular(20), 
                     ),
                   ),
@@ -394,7 +387,6 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
             ),
           ),
 
-          // 🟢 边框高亮 (颜色随状态变化)
           Center(
             child: Container(
               width: rectWidth,
@@ -402,7 +394,6 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                  // 1:黄色(眨眼检测中), 2:绿色(通过), 0:白色(未检测)
                   color: _step == 1 ? Colors.yellowAccent : (_step == 2 ? Colors.greenAccent : Colors.white), 
                   width: 4
                 ),
@@ -410,7 +401,6 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
             ),
           ),
 
-          // 提示文字
           Positioned(
             bottom: size.height * 0.15, 
             left: 20, right: 20,
@@ -433,7 +423,6 @@ class _FaceCameraViewState extends State<FaceCameraView> with WidgetsBindingObse
             ),
           ),
 
-          // Loading Overlay
           if (_hasCaptured || _isLoadingReference)
             Container(
               color: Colors.black54,

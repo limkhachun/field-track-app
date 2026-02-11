@@ -11,7 +11,6 @@ import 'package:camera/camera.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
-// 📦 NEW: Required for WiFi Name & BSSID check
 import 'package:network_info_plus/network_info_plus.dart'; 
 
 import '../widgets/face_camera_view.dart';
@@ -124,7 +123,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 }
 
 // ==========================================
-//  Tab 1: Action Tab (Modified for Security)
+//  Tab 1: Action Tab
 // ==========================================
 
 class AttendanceActionTab extends StatefulWidget {
@@ -229,7 +228,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     }
   }
 
-  // 🟢 MODIFICATION 1: Enhanced Address Detail
   Future<void> _getAddressFromLatLng(Position position) async {
     try {
       List<Placemark> placemarks =
@@ -238,22 +236,21 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       if (placemarks.isNotEmpty && mounted) {
         Placemark place = placemarks[0];
         
-        // Construct a highly detailed address string
+        // 详细地址拼接
         List<String> parts = [
           place.name ?? "",
-          place.subThoroughfare ?? "", // House Number
-          place.thoroughfare ?? "",    // Street
-          place.subLocality ?? "",     // Area/Taman
-          place.locality ?? "",        // City/Town
+          place.subThoroughfare ?? "", // 门牌号
+          place.thoroughfare ?? "",    // 街道
+          place.subLocality ?? "",     // 区域/Taman
+          place.locality ?? "",        // 城市
           place.postalCode ?? "",
-          place.administrativeArea ?? "", // State
+          place.administrativeArea ?? "", // 州
           place.country ?? ""
         ];
 
-        // Filter out empty strings and duplicates, then join
         String detailedAddress = parts
             .where((p) => p.isNotEmpty)
-            .toSet() // Remove simple duplicates
+            .toSet() 
             .join(", ");
 
         setState(() => _currentAddress = detailedAddress);
@@ -279,21 +276,21 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
             const LocationSettings(accuracy: LocationAccuracy.high));
   }
 
-  // 🟢 MODIFICATION 2: Security Validation (WiFi BSSID + GPS Radius)
+  // 🟢 核心修改 1: 简化后的校验逻辑
   Future<bool> _validateRestrictions() async {
     setState(() => _isLoading = true);
     
     try {
-      // 1. Fetch Office Settings from Firestore
       final doc = await FirebaseFirestore.instance.collection('settings').doc('office_location').get();
-      if (!doc.exists) throw "Office location settings not found in database.";
+      // 如果还没配置，暂时放行
+      if (!doc.exists) return true;
       
       final data = doc.data() as Map<String, dynamic>;
       final double officeLat = (data['latitude'] as num).toDouble();
       final double officeLng = (data['longitude'] as num).toDouble();
       final double allowedRadius = (data['radius'] as num?)?.toDouble() ?? 500.0;
 
-      // Parse WiFi List (Support object array [{ssid:..., bssid:...}])
+      // WiFi Check
       List<Map<String, String>> allowedWifiList = [];
       if (data['allowedWifis'] is List) {
         for (var item in data['allowedWifis']) {
@@ -310,32 +307,25 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         allowedWifiList.add({'ssid': data['wifiSSID'], 'bssid': ''});
       }
 
-      // 2. Perform WiFi Check
       if (allowedWifiList.isNotEmpty) {
         final info = NetworkInfo();
         String? currentSSID = await info.getWifiName();
-        String? currentBSSID = await info.getWifiBSSID(); // Needs Location/WiFi Access permission
+        String? currentBSSID = await info.getWifiBSSID(); 
 
-        // Cleanup strings
         if (currentSSID != null) currentSSID = currentSSID.replaceAll('"', '');
         if (currentBSSID != null) currentBSSID = currentBSSID.toLowerCase();
-
-        // Handle Android 12+ privacy masking
         if (currentBSSID == "02:00:00:00:00:00") currentBSSID = null;
 
         bool isWifiValid = false;
         for (var config in allowedWifiList) {
           bool ssidMatch = config['ssid'] == currentSSID;
-          
           bool bssidMatch = true;
-          // Only enforce BSSID check if it's configured in the allowed list
           if (config['bssid'] != null && config['bssid']!.isNotEmpty) {
              if (currentBSSID == null) {
-               throw "Security Check Failed: Cannot read router MAC address (BSSID).\nPlease enable GPS & Precise Location permissions.";
+               throw "Unable to verify WiFi security.\nPlease enable GPS/Location permission.";
              }
              bssidMatch = config['bssid'] == currentBSSID;
           }
-
           if (ssidMatch && bssidMatch) {
             isWifiValid = true;
             break;
@@ -343,11 +333,12 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         }
 
         if (!isWifiValid) {
-           throw "WiFi Validation Failed.\n\nYour Connection:\nSSID: ${currentSSID ?? 'Unknown'}\nBSSID: ${currentBSSID ?? 'Unknown'}\n\nPlease connect to the verified company WiFi.";
+           // 🟢 简洁提示：未连接公司 WiFi
+           throw "Not connected to company WiFi.\nPlease connect to clock in.";
         }
       }
 
-      // 3. Perform GPS Radius Check
+      // GPS Check
       Position? currentPos = await _determinePosition();
       if (currentPos == null) throw "Cannot determine GPS location.";
 
@@ -359,10 +350,10 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       );
 
       if (distanceInMeters > allowedRadius) {
-        throw "You are too far from the office.\nDistance: ${distanceInMeters.toStringAsFixed(0)}m\nAllowed: ${allowedRadius.toInt()}m";
+        // 🟢 简洁提示：位置不对
+        throw "You are outside office range.\nPlease move closer to clock in.";
       }
 
-      // If we are here, all checks passed
       return true;
 
     } catch (e) {
@@ -370,7 +361,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         showDialog(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text("Access Denied"),
+            title: const Text("Access Denied"), 
             content: Text(e.toString()),
             actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK"))],
           ),
@@ -399,6 +390,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     
     bool isLastVerified = false;
     String? lastSession;
+    bool hasClockedOut = false; // 标记是否已打卡下班
 
     if (hasAnyRecord) {
       final docs = q.docs;
@@ -407,6 +399,9 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       
       lastSession = last['session'];
       isLastVerified = last['verificationStatus'] == 'Verified';
+      
+      // 检查是否有 Clock Out 记录
+      hasClockedOut = docs.any((doc) => doc['session'] == 'Clock Out' && doc['verificationStatus'] == 'Verified');
     }
 
     if (!mounted) return;
@@ -439,21 +434,26 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
               
               const Divider(),
 
+              // 🟢 核心修改 2: 如果已 Clock Out，禁用 Break 按钮
               _buildActionTile(
                 title: "att.act_break_out".tr(),
-                subtitle: (lastSession == 'Break Out' && isLastVerified) ? "att.sub_locked_verified".tr() : "att.sub_lunch".tr(),
+                subtitle: hasClockedOut 
+                    ? "Shift Ended" 
+                    : ((lastSession == 'Break Out' && isLastVerified) ? "att.sub_locked_verified".tr() : "att.sub_lunch".tr()),
                 icon: Icons.coffee,
                 color: Colors.orange,
-                isLocked: !hasAnyRecord || (lastSession == 'Break Out' && isLastVerified),
+                isLocked: !hasAnyRecord || (lastSession == 'Break Out' && isLastVerified) || hasClockedOut,
                 onTap: () => _handleAction("Break Out"),
               ),
 
               _buildActionTile(
                 title: "att.act_break_in".tr(),
-                subtitle: (lastSession == 'Break In' && isLastVerified) ? "att.sub_locked_verified".tr() : "att.sub_back_work".tr(),
+                subtitle: hasClockedOut 
+                    ? "Shift Ended" 
+                    : ((lastSession == 'Break In' && isLastVerified) ? "att.sub_locked_verified".tr() : "att.sub_back_work".tr()),
                 icon: Icons.work_history,
                 color: Colors.blue,
-                isLocked: !hasAnyRecord || (lastSession == 'Break In' && isLastVerified),
+                isLocked: !hasAnyRecord || (lastSession == 'Break In' && isLastVerified) || hasClockedOut,
                 onTap: () => _handleAction("Break In"),
               ),
 
@@ -500,15 +500,12 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     );
   }
 
-  // 🟢 Modified Handle Action to include Validation
   void _handleAction(String action) async {
-    Navigator.pop(context); // Close sheet
+    Navigator.pop(context); 
 
-    // 1. Run Security Checks
     bool isAllowed = await _validateRestrictions();
-    if (!isAllowed) return; // Stop if failed
+    if (!isAllowed) return; 
 
-    // 2. Proceed if Allowed
     setState(() => _selectedAction = action);
     _takePhoto(); 
   }
