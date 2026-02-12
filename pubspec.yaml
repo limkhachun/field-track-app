@@ -18,15 +18,16 @@ dependencies:
   firebase_storage: ^12.0.0
   
   # Localization
-  easy_localization: ^3.0.7  # 建议使用具体的小版本以获得 bug 修复
-  intl: 0.20.2              # 注意：intl 0.20 与某些旧包可能冲突，如果报错请回退至 0.19
+  easy_localization: ^3.0.7
+  intl: 0.20.2
   flutter_local_notifications: ^18.0.1
   timezone: ^0.9.4
   shared_preferences: ^2.3.5
   flutter_timezone: ^3.0.1
+  
   # Location and Maps
   geolocator: ^13.0.2
-  geocoding: ^3.0.0          # 检查版本兼容性
+  geocoding: ^3.0.0
   google_maps_flutter: ^2.10.0
   
   # Biometrics (Face ID / Fingerprint)
@@ -42,6 +43,7 @@ dependencies:
   cupertino_icons: ^1.0.6
   tflite_flutter: ^0.11.0
   image: ^4.1.7
+  
   # Utilities
   http: ^1.2.0
   url_launcher: ^6.3.0
@@ -55,9 +57,11 @@ dependencies:
   gal: ^2.3.2
 
 dev_dependencies:
+  # 修复 1：这里增加了缩进 (2个空格)
+  flutter_launcher_icons: ^0.13.1
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0 # 保持最新的代码规范检查
+  flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true
@@ -68,3 +72,11 @@ flutter:
     # 如果未来有图片资源，可以添加：
     - assets/images/
     - assets/models/
+    # 修复 2：移除了这里错误的 flutter_launcher_icons 配置
+
+# 修复 3：flutter_launcher_icons 配置必须在最外层（顶级），不缩进
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icon/app_icon.png" # 请确保这个文件真实存在
+  min_sdk_android: 21
