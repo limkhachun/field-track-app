@@ -11,12 +11,15 @@ plugins {
 android {
     namespace = "com.example.field_track_app"
     compileSdk = flutter.compileSdkVersion
+    
+    // 🟢 建议明确指定 NDK 版本，或者直接使用 flutter.ndkVersion
+    // 如果遇到 NDK 报错，可以尝试取消下面这行的注释并指定具体版本，例如 "25.1.8937393"
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-        // 🟢 1. 开启核心库脱糖 (Fix for flutter_local_notifications)
+        // 🟢 1. 开启核心库脱糖 (Fix for flutter_local_notifications & older Android versions)
         isCoreLibraryDesugaringEnabled = true
     }
 
@@ -33,7 +36,8 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        // 🟢 2. 确保开启 MultiDex (如果应用较大，通常建议开启，虽然 minSdk 21 原生支持，但显式声明更稳妥)
+        
+        // 🟢 2. 确保开启 MultiDex
         multiDexEnabled = true 
     }
 
@@ -43,13 +47,16 @@ android {
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
             
-            // 🟢 👇 新增这几行配置
+            // 🟢 3. 生产环境优化配置
             // 开启代码混淆/压缩
             isMinifyEnabled = true 
             // 开启资源压缩 (移除未使用的图片等)
             isShrinkResources = true 
-            // 引用刚才创建的混淆规则文件
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // 引用混淆规则文件 (默认规则 + 自定义规则)
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }
@@ -58,7 +65,11 @@ flutter {
     source = "../.."
 }
 
-// 🟢 3. 添加脱糖库依赖 (Fix for flutter_local_notifications)
+// 🟢 4. 添加依赖
 dependencies {
+    // 核心库脱糖依赖 (必须与上面的 isCoreLibraryDesugaringEnabled = true 配合使用)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    
+    // 如果需要手动添加 multidex 依赖（通常 compileSdk 34+ 不需要显式添加，但加上无害）
+    implementation("androidx.multidex:multidex:2.0.1")
 }
