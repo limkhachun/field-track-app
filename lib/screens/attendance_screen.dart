@@ -33,6 +33,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     _loadUserProfile();
   }
 
+  /// Loads the user's face ID photo for the app bar avatar
   Future<void> _loadUserProfile() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -63,7 +64,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         }
       }
     } catch (e) {
-      debugPrint("Error loading profile: $e");
+      // Error handling silently
     }
   }
 
@@ -190,7 +191,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         }
       }
     } catch (e) {
-      debugPrint("$e");
+      // Error handling silently
     }
   }
 
@@ -206,7 +207,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         }
       }
     } catch (e) {
-      debugPrint("Download error: $e");
+      // Error handling silently
     }
   }
 
@@ -236,15 +237,14 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       if (placemarks.isNotEmpty && mounted) {
         Placemark place = placemarks[0];
         
-        // 详细地址拼接
         List<String> parts = [
           place.name ?? "",
-          place.subThoroughfare ?? "", // 门牌号
-          place.thoroughfare ?? "",    // 街道
-          place.subLocality ?? "",     // 区域/Taman
-          place.locality ?? "",        // 城市
+          place.subThoroughfare ?? "",
+          place.thoroughfare ?? "",
+          place.subLocality ?? "",
+          place.locality ?? "",
           place.postalCode ?? "",
-          place.administrativeArea ?? "", // 州
+          place.administrativeArea ?? "",
           place.country ?? ""
         ];
 
@@ -276,13 +276,12 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
             const LocationSettings(accuracy: LocationAccuracy.high));
   }
 
-  // 🟢 核心修改 1: 简化后的校验逻辑
+  /// Validation: Checks Office Location and WiFi constraints
   Future<bool> _validateRestrictions() async {
     setState(() => _isLoading = true);
     
     try {
       final doc = await FirebaseFirestore.instance.collection('settings').doc('office_location').get();
-      // 如果还没配置，暂时放行
       if (!doc.exists) return true;
       
       final data = doc.data() as Map<String, dynamic>;
@@ -333,7 +332,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
         }
 
         if (!isWifiValid) {
-           // 🟢 简洁提示：未连接公司 WiFi
            throw "Not connected to company WiFi.\nPlease connect to clock in.";
         }
       }
@@ -350,7 +348,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       );
 
       if (distanceInMeters > allowedRadius) {
-        // 🟢 简洁提示：位置不对
         throw "You are outside office range.\nPlease move closer to clock in.";
       }
 
@@ -390,7 +387,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     
     bool isLastVerified = false;
     String? lastSession;
-    bool hasClockedOut = false; // 标记是否已打卡下班
+    bool hasClockedOut = false;
 
     if (hasAnyRecord) {
       final docs = q.docs;
@@ -400,7 +397,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
       lastSession = last['session'];
       isLastVerified = last['verificationStatus'] == 'Verified';
       
-      // 检查是否有 Clock Out 记录
       hasClockedOut = docs.any((doc) => doc['session'] == 'Clock Out' && doc['verificationStatus'] == 'Verified');
     }
 
@@ -434,7 +430,6 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
               
               const Divider(),
 
-              // 🟢 核心修改 2: 如果已 Clock Out，禁用 Break 按钮
               _buildActionTile(
                 title: "att.act_break_out".tr(),
                 subtitle: hasClockedOut 
@@ -942,7 +937,7 @@ class _HistoryTabState extends State<HistoryTab> {
 }
 
 // ==========================================
-//  Tab 3: Schedule (No Changes)
+//  Tab 3: Schedule Tab (MODIFIED)
 // ==========================================
 
 class ScheduleTab extends StatefulWidget {
@@ -980,10 +975,10 @@ class _ScheduleTabState extends State<ScheduleTab> {
   }
 
   String _formatDuration(Duration d) {
-    if (d.inMinutes == 0) return "0.00";
-    String hours = d.inHours.toString();
-    String mins = (d.inMinutes % 60).toString().padLeft(2, '0');
-    return "$hours.$mins";
+    int minutes = d.inMinutes;
+    int h = minutes ~/ 60;
+    int m = minutes % 60;
+    return "${h}h ${m}m";
   }
 
   @override
@@ -1044,9 +1039,10 @@ class _ScheduleTabState extends State<ScheduleTab> {
                       String timeOut = "--:--";
                       String status = "Absent";
                       Color statusColor = Colors.grey;
-                      String lateStr = "0.00";
-                      String underStr = "0.00";
-                      String otStr = "0.00";
+                      
+                      String lateStr = "0h 0m";
+                      String underStr = "0h 0m";
+                      String otStr = "0h 0m";
 
                       if (attSnapshot.hasData && attSnapshot.data!.docs.isNotEmpty) {
                         final docs = attSnapshot.data!.docs;
@@ -1069,6 +1065,8 @@ class _ScheduleTabState extends State<ScheduleTab> {
                            timeIn = DateFormat('HH:mm').format(ts);
                            status = "Working";
                            statusColor = Colors.blue;
+                           
+                           // Calculate Late (Strict: Actual In - Sched Start)
                            if (schedStart != null && ts.isAfter(schedStart)) {
                              lateStr = _formatDuration(ts.difference(schedStart));
                            }
@@ -1079,13 +1077,17 @@ class _ScheduleTabState extends State<ScheduleTab> {
                            timeOut = DateFormat('HH:mm').format(ts);
                            status = "Present";
                            statusColor = Colors.green;
-                          if (schedEnd != null) {
-                           if (ts.isAfter(schedEnd)) {
-                             otStr = _formatDuration(ts.difference(schedEnd));
-                           } else {
-                             underStr = _formatDuration(schedEnd.difference(ts));
+                           
+                           if (schedEnd != null) {
+                             // Calculate Overtime (Actual Out - Sched End)
+                             if (ts.isAfter(schedEnd)) {
+                               otStr = _formatDuration(ts.difference(schedEnd));
+                             } 
+                             // Calculate Undertime (Sched End - Actual Out)
+                             else if (ts.isBefore(schedEnd)) {
+                               underStr = _formatDuration(schedEnd.difference(ts));
+                             }
                            }
-                         }
                         } else if (breakOutDoc != null) {
                            final ts = ((breakOutDoc.data() as Map<String,dynamic>)['timestamp'] as Timestamp).toDate();
                            timeOut = DateFormat('HH:mm').format(ts);
@@ -1113,8 +1115,8 @@ class _ScheduleTabState extends State<ScheduleTab> {
     String shiftStart = scheduleData['start'] != null ? DateFormat('HH:mm').format((scheduleData['start'] as Timestamp).toDate().toLocal()) : "--:--";
     String shiftEnd = scheduleData['end'] != null ? DateFormat('HH:mm').format((scheduleData['end'] as Timestamp).toDate().toLocal()) : "--:--";
 
-    Color lateColor = late == "0.00" ? Colors.black : Colors.red;
-    Color underColor = under == "0.00" ? Colors.black : Colors.red;
+    Color lateColor = late == "0h 0m" ? Colors.black : Colors.red;
+    Color underColor = under == "0h 0m" ? Colors.black : Colors.red;
 
     return Card(
       elevation: 2,
@@ -1159,11 +1161,11 @@ class _ScheduleTabState extends State<ScheduleTab> {
                         ),
                         const SizedBox(height: 8),
                       ],
-                      _buildStatRow("att.label_late".tr(), late, lateColor),
+                      _buildStatRow("Late", late, lateColor),
                       const SizedBox(height: 4),
-                      _buildStatRow("att.label_under".tr(), under, underColor),
+                      _buildStatRow("Under", under, underColor),
                       const SizedBox(height: 4),
-                      _buildStatRow("att.label_ot".tr(), ot, Colors.black),
+                      _buildStatRow("OT", ot, Colors.blue),
                     ],
                   ),
                 )
@@ -1205,7 +1207,7 @@ class _ScheduleTabState extends State<ScheduleTab> {
 }
 
 // ==========================================
-//  Tab 4: Submit (Modified: Limit Date to Today)
+//  Tab 4: Submit Tab (Modified Logic)
 // ==========================================
 
 class SubmitTab extends StatefulWidget {
@@ -1242,6 +1244,13 @@ class _SubmitTabState extends State<SubmitTab> {
     setState(() => _currentStartDate = _currentStartDate.add(Duration(days: 7 * weeks)));
   }
 
+  String _formatDuration(Duration d) {
+    int minutes = d.inMinutes;
+    int h = minutes ~/ 60;
+    int m = minutes % 60;
+    return "${h}h ${m}m";
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isFetchingUser) return const Center(child: CircularProgressIndicator());
@@ -1250,25 +1259,19 @@ class _SubmitTabState extends State<SubmitTab> {
     final user = FirebaseAuth.instance.currentUser;
     final now = DateTime.now();
     
-    // 🟢 MODIFICATION 3: Limit End Date to Today
+    // Limit end date to today
     final originalEndDate = _currentStartDate.add(const Duration(days: 6));
     final endOfToday = DateTime(now.year, now.month, now.day, 23, 59, 59);
-    
-    // Use the earlier of the two dates (end of week OR today)
     DateTime effectiveEndDate = originalEndDate.isAfter(endOfToday) ? endOfToday : originalEndDate;
     
     final startStr = DateFormat('yyyy-MM-dd').format(_currentStartDate);
     final endStr = DateFormat('yyyy-MM-dd').format(effectiveEndDate);
     
-    // Header keeps showing the full week for navigation clarity
     final displayRange = "${DateFormat('dd MMM').format(_currentStartDate)} - ${DateFormat('dd MMM').format(originalEndDate)}";
-    
-    // If user scrolled to future week, don't show list
     bool isFutureWeek = _currentStartDate.isAfter(endOfToday);
 
     return Column(
       children: [
-        // Header (Same as ScheduleTab)
         Container(
           padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
           color: Colors.white,
@@ -1293,7 +1296,7 @@ class _SubmitTabState extends State<SubmitTab> {
             stream: FirebaseFirestore.instance.collection('schedules')
                 .where('userId', isEqualTo: _myEmpCode)
                 .where('date', isGreaterThanOrEqualTo: startStr)
-                .where('date', isLessThanOrEqualTo: endStr) // 🟢 Restricted Date
+                .where('date', isLessThanOrEqualTo: endStr) 
                 .orderBy('date')
                 .snapshots(),
             builder: (context, snapshot) {
@@ -1308,6 +1311,9 @@ class _SubmitTabState extends State<SubmitTab> {
                   final scheduleData = scheduleDocs[index].data() as Map<String, dynamic>;
                   final dateStr = scheduleData['date'] as String;
                   
+                  DateTime? schedStart = scheduleData['start'] != null ? (scheduleData['start'] as Timestamp).toDate() : null;
+                  DateTime? schedEnd = scheduleData['end'] != null ? (scheduleData['end'] as Timestamp).toDate() : null;
+                  
                   String? attendanceId; 
 
                   return StreamBuilder<QuerySnapshot>(
@@ -1319,6 +1325,10 @@ class _SubmitTabState extends State<SubmitTab> {
                       String timeIn = "--:--";
                       String timeOut = "--:--";
                       
+                      String lateStr = "0h 0m";
+                      String underStr = "0h 0m";
+                      String otStr = "0h 0m";
+
                       if (attSnapshot.hasData && attSnapshot.data!.docs.isNotEmpty) {
                         final docs = attSnapshot.data!.docs;
                         attendanceId = docs.first.id;
@@ -1340,11 +1350,21 @@ class _SubmitTabState extends State<SubmitTab> {
                         if (clockInDoc != null) {
                            final ts = ((clockInDoc.data() as Map<String,dynamic>)['timestamp'] as Timestamp).toDate();
                            timeIn = DateFormat('HH:mm').format(ts);
+                           if (schedStart != null && ts.isAfter(schedStart)) {
+                             lateStr = _formatDuration(ts.difference(schedStart));
+                           }
                         }
 
                         if (clockOutDoc != null) {
                            final ts = ((clockOutDoc.data() as Map<String,dynamic>)['timestamp'] as Timestamp).toDate();
                            timeOut = DateFormat('HH:mm').format(ts);
+                           if (schedEnd != null) {
+                             if (ts.isAfter(schedEnd)) {
+                               otStr = _formatDuration(ts.difference(schedEnd));
+                             } else if (ts.isBefore(schedEnd)) {
+                               underStr = _formatDuration(schedEnd.difference(ts));
+                             }
+                           }
                         } else if (breakOutDoc != null) {
                            final ts = ((breakOutDoc.data() as Map<String,dynamic>)['timestamp'] as Timestamp).toDate();
                            timeOut = DateFormat('HH:mm').format(ts);
@@ -1352,7 +1372,7 @@ class _SubmitTabState extends State<SubmitTab> {
                       }
 
                       return _buildSubmitCard(
-                        scheduleData, attendanceId, timeIn, timeOut
+                        scheduleData, attendanceId, timeIn, timeOut, lateStr, underStr, otStr
                       );
                     }
                   );
@@ -1365,12 +1385,15 @@ class _SubmitTabState extends State<SubmitTab> {
     );
   }
 
-  Widget _buildSubmitCard(Map<String, dynamic> scheduleData, String? attendanceId, String inTime, String outTime) {
+  Widget _buildSubmitCard(Map<String, dynamic> scheduleData, String? attendanceId, String inTime, String outTime, String late, String under, String ot) {
     final dateObj = DateTime.parse(scheduleData['date']);
     final weekDay = DateFormat('EEEE').format(dateObj);
     final fmtDate = DateFormat('dd/MM/yyyy').format(dateObj);
     String shiftStart = scheduleData['start'] != null ? DateFormat('HH:mm').format((scheduleData['start'] as Timestamp).toDate().toLocal()) : "--:--";
     String shiftEnd = scheduleData['end'] != null ? DateFormat('HH:mm').format((scheduleData['end'] as Timestamp).toDate().toLocal()) : "--:--";
+
+    Color lateColor = late == "0h 0m" ? Colors.black : Colors.red;
+    Color underColor = under == "0h 0m" ? Colors.black : Colors.red;
 
     return GestureDetector(
       onTap: () {
@@ -1399,12 +1422,34 @@ class _SubmitTabState extends State<SubmitTab> {
               const SizedBox(height: 12),
               
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(child: _buildTimeBox("att.label_in".tr(), inTime)),
-                  const SizedBox(width: 10),
-                  Expanded(child: _buildTimeBox("att.label_out".tr(), outTime)),
+                  Expanded(
+                    flex: 5,
+                    child: Row(
+                      children: [
+                        Expanded(child: _buildTimeBox("att.label_in".tr(), inTime)),
+                        const SizedBox(width: 10),
+                        Expanded(child: _buildTimeBox("att.label_out".tr(), outTime)),
+                      ],
+                    ),
+                  ),
                   const SizedBox(width: 16),
-                  const Icon(Icons.edit_note, color: Colors.blue, size: 28), 
+                  Expanded(
+                    flex: 3,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        const Icon(Icons.edit_note, color: Colors.blue, size: 24),
+                        const SizedBox(height: 8),
+                        _buildStatRow("Late", late, lateColor),
+                        const SizedBox(height: 4),
+                        _buildStatRow("Under", under, underColor),
+                        const SizedBox(height: 4),
+                        _buildStatRow("OT", ot, Colors.blue),
+                      ],
+                    ),
+                  )
                 ],
               ),
             ],
@@ -1428,6 +1473,16 @@ class _SubmitTabState extends State<SubmitTab> {
             child: Text(time, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF15438c), fontSize: 15)),
           ),
         )
+      ],
+    );
+  }
+
+  Widget _buildStatRow(String label, String value, Color valueColor) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        Text("$label: ", style: const TextStyle(fontSize: 11, color: Colors.black)),
+        Text(value, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: valueColor)),
       ],
     );
   }
