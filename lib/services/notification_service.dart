@@ -27,7 +27,7 @@ class NotificationService {
 
   bool _isInitialized = false;
   
-  // 🟢 监听器订阅列表 (用于退出登录时取消)
+  // 🟢 Listener Subscription List (to cancel on logout)
   final List<StreamSubscription> _subscriptions = [];
   DateTime? _listeningStartTime;
 
@@ -63,38 +63,38 @@ class NotificationService {
   }
 
   // =========================================================
-  // 🎧 🟢 核心功能：监听 Firestore 数据变化
+  // 🎧 🟢 CORE FUNCTION: Listen to Firestore Updates
   // =========================================================
 
-  /// 在用户登录成功后调用此方法
+  /// Call this method after user login
   void startListeningToUserUpdates(String uid) {
-    stopListening(); // 防止重复监听
-    _listeningStartTime = DateTime.now(); // 记录开始时间，只通知这之后的变化
+    stopListening(); // Prevent duplicate listeners
+    _listeningStartTime = DateTime.now(); // Only notify for changes AFTER this time
     debugPrint("🎧 Started listening for Admin updates for UID: $uid");
 
-    // 1. 监听 Leave Approval (请假审批)
+    // 1. Listen for Leave Approvals
     _subscriptions.add(
       FirebaseFirestore.instance
           .collection('leaves')
-          .where('authUid', isEqualTo: uid) // 确保这里字段名和数据库一致
+          .where('authUid', isEqualTo: uid) 
           .snapshots()
           .listen((snapshot) {
         for (var change in snapshot.docChanges) {
-          // 只关注修改过的文档 (Admin 修改状态)
+          // Only care about Modified docs (Admin updates status)
           if (change.type == DocumentChangeType.modified) {
             final data = change.doc.data() as Map<String, dynamic>;
             _checkAndNotify(
               data: data,
               title: 'Leave Update',
               body: 'Your ${data['type']} request has been ${data['status']}.',
-              timeField: 'reviewedAt', // Admin 审核的时间字段
+              timeField: 'reviewedAt', // Field updated by Admin
             );
           }
         }
       })
     );
 
-    // 2. 监听 Attendance Corrections (补卡审批)
+    // 2. Listen for Attendance Correction Replies
     _subscriptions.add(
       FirebaseFirestore.instance
           .collection('attendance_corrections')
@@ -115,7 +115,7 @@ class NotificationService {
       })
     );
 
-    // 3. 监听 Profile Updates (资料修改审批)
+    // 3. Listen for Profile Update Requests
     _subscriptions.add(
       FirebaseFirestore.instance
           .collection('edit_requests')
@@ -136,24 +136,48 @@ class NotificationService {
       })
     );
 
-    // 4. 监听 Payslips (工资单发布) - 监听新增
+    // 4. Listen for New Payslips
     _subscriptions.add(
       FirebaseFirestore.instance
           .collection('payslips')
-          .where('uid', isEqualTo: uid) // 注意：这里通常存的是 DocID，确认一下你存的是 authUid 还是 user doc id
+          .where('uid', isEqualTo: uid) // Ensure this matches your payslip logic (authUid vs empId)
           .where('status', isEqualTo: 'Published')
           .snapshots()
           .listen((snapshot) {
         for (var change in snapshot.docChanges) {
-          // 工资单通常是新建或修改为 Published
+          // Payslips are either Added or Modified to 'Published'
           if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
             final data = change.doc.data() as Map<String, dynamic>;
-            // 对于工资单，我们检查 updatedAt 是否很新
             _checkAndNotify(
               data: data,
               title: 'Payslip Ready',
               body: 'Your payslip for ${data['month']} is now available.',
-              timeField: 'updatedAt',
+              timeField: 'updatedAt', // Ensure you save this timestamp when publishing
+            );
+          }
+        }
+      })
+    );
+    
+    // 5. 🟢 Listen for Announcements
+    _subscriptions.add(
+      FirebaseFirestore.instance
+          .collection('announcements')
+          .orderBy('createdAt', descending: true)
+          .limit(1)
+          .snapshots()
+          .listen((snapshot) {
+        if (snapshot.docs.isNotEmpty) {
+          final doc = snapshot.docs.first;
+          // Check if this is a new announcement (created after login)
+          // or you can implement a 'read' status logic if needed
+          if (doc.metadata.hasPendingWrites == false) { // Skip local writes if any
+             final data = doc.data();
+             _checkAndNotify(
+              data: data,
+              title: '📢 New Announcement',
+              body: data['message'] ?? 'Check the app for a new update.',
+              timeField: 'createdAt',
             );
           }
         }
@@ -161,7 +185,7 @@ class NotificationService {
     );
   }
 
-  /// 内部辅助函数：检查时间并发送通知
+  /// Internal Helper: Check timestamp before showing notification
   void _checkAndNotify({
     required Map<String, dynamic> data,
     required String title,
@@ -171,13 +195,13 @@ class NotificationService {
     if (_listeningStartTime == null) return;
 
     Timestamp? ts = data[timeField] as Timestamp?;
-    // 如果没有时间戳，或者时间戳晚于监听开始时间（说明是新发生的动作）
+    // Only notify if the action happened AFTER we started listening (i.e., just now)
     if (ts != null && ts.toDate().isAfter(_listeningStartTime!)) {
        showStatusNotification(title, body);
     }
   }
 
-  /// 退出登录时调用
+  /// Call this on Logout
   void stopListening() {
     for (var sub in _subscriptions) {
       sub.cancel();
@@ -218,7 +242,7 @@ class NotificationService {
   }
 
   // =========================================================
-  // 🔔 即时状态通知 (Admin 审批结果)
+  // 🔔 Instant Status Notification (Admin Actions)
   // =========================================================
 
   Future<void> showStatusNotification(String title, String body) async {
@@ -233,6 +257,8 @@ class NotificationService {
     );
 
     const NotificationDetails details = NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails());
+    
+    // Use current time as ID to allow multiple notifications stacking
     int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
     await _notificationsPlugin.show(

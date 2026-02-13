@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+// import 'package:cloud_firestore/cloud_firestore.dart'; 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:field_track_app/screens/login_screen.dart';
 import 'package:field_track_app/screens/change_password_screen.dart';
-import '../services/notification_service.dart'; // 🟢 1. 取消注释以使用 NotificationService
+import 'package:field_track_app/screens/announcement_screen.dart'; // 🟢 Import New Screen
+import '../services/notification_service.dart'; 
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -94,6 +96,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // 1. App Settings Section
           _buildSectionHeader('settings.header_app'.tr()),
           
+          // 🟢 NEW: Announcement Tile
+          ListTile(
+            leading: const Icon(Icons.campaign, color: Colors.orange),
+            title: const Text('Announcements'), // "announcement.title".tr()
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AnnouncementScreen())),
+          ),
+
+          const Divider(),
+
           SwitchListTile(
             title: Text('settings.biometric_lock'.tr()),
             subtitle: Text('settings.biometric_desc'.tr()),
@@ -144,10 +156,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leading: const Icon(Icons.logout, color: Colors.red),
             title: Text('settings.logout'.tr(), style: const TextStyle(color: Colors.red)),
             onTap: () async {
-              // 🟢 2. 停止监听器 (防止内存泄漏和后台报错)
               NotificationService().stopListening();
               
-              // 执行登出
               await _auth.signOut();
               
               if (!context.mounted) return;
