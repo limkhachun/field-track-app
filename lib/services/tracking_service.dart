@@ -10,10 +10,10 @@ class TrackingService {
   StreamSubscription<Position>? _positionStream;
   String? _currentUserId;
   
-  // 🟢 新增：记录上一次成功上传的位置
+  // 🟢 记录上一次成功上传的位置，用于距离过滤
   Position? _lastUploadedPosition;
   
-  // 🟢 阈值设置：200米
+  // 🟢 阈值设置：200米（过滤信号漂移并减少数据库读写）
   static const double _uploadDistanceFilter = 200.0;
 
   final ValueNotifier<bool> isTrackingNotifier = ValueNotifier(false);
@@ -60,7 +60,7 @@ class TrackingService {
 
     if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
       _currentUserId = userId;
-      _lastUploadedPosition = null; // 🟢 每次开始前重置上次上传点
+      _lastUploadedPosition = null; 
       
       final prefs = await SharedPreferences.getInstance();
       final bool shouldNotify = prefs.getBool('notifications_enabled') ?? true;
@@ -69,11 +69,9 @@ class TrackingService {
         await NotificationService().showTrackingNotification();
       }
 
-      // 🟢 这里的 filter 保持较小 (如 10m)，让 Stream 保持活跃，
-      // 具体的上传逻辑由 _uploadLocation 里的 200m 阈值控制。
       const LocationSettings locationSettings = LocationSettings(
         accuracy: LocationAccuracy.high,
-        distanceFilter: 10, 
+        distanceFilter: 10, // 保持流活跃，实际过滤在 _uploadLocation 处理
       );
 
       _positionStream = Geolocator.getPositionStream(locationSettings: locationSettings)
@@ -95,7 +93,7 @@ class TrackingService {
     _positionStream = null;
     _autoStopTimer?.cancel();
     _currentUserId = null;
-    _lastUploadedPosition = null; // 🟢 清除缓存位置
+    _lastUploadedPosition = null;
     isTrackingNotifier.value = false;
     
     await NotificationService().cancelTrackingNotification();
@@ -103,11 +101,12 @@ class TrackingService {
     debugPrint("🛑 Tracking Stopped");
   }
 
-  /// ☁️ 上传位置到 Firestore (带手动距离过滤)
+  /// ☁️ 上传位置到 Firestore (双重更新优化版)
+  /// 同时更新历史日志和最新位置文档，以支持大规模员工管理
   Future<void> _uploadLocation(Position pos) async {
     if (_currentUserId == null) return;
 
-    // 🟢 核心逻辑：手动距离过滤 (200米)
+    // 🟢 手动距离过滤 (200米)
     if (_lastUploadedPosition != null) {
       double distance = Geolocator.distanceBetween(
         _lastUploadedPosition!.latitude,
@@ -116,32 +115,43 @@ class TrackingService {
         pos.longitude,
       );
 
-      // 如果移动距离小于 200 米，直接忽略，不上传
       if (distance < _uploadDistanceFilter) {
-        // debugPrint("🚫 Skipped: Moved only ${distance.toStringAsFixed(1)}m");
         return; 
       }
     }
 
     final now = DateTime.now();
     final todayStr = DateFormat('yyyy-MM-dd').format(now);
+    final batch = FirebaseFirestore.instance.batch();
+
+    // 1. 添加到历史轨迹集合 (用于 Admin 端按需画线)
+    final logRef = FirebaseFirestore.instance.collection('tracking_logs').doc();
+    batch.set(logRef, {
+      'uid': _currentUserId,
+      'lat': pos.latitude,
+      'lng': pos.longitude,
+      'speed': pos.speed, 
+      'heading': pos.heading,
+      'timestamp': FieldValue.serverTimestamp(),
+      'date': todayStr,
+    });
+
+    // 2. 🟢 核心优化：更新司机的“最后已知位置”文档
+    // 这样做让 Admin 首页只需读取 100 个文档即可查看所有人实时状态，极大节省读取成本。
+    final lastLocRef = FirebaseFirestore.instance.collection('user_last_locations').doc(_currentUserId);
+    batch.set(lastLocRef, {
+      'uid': _currentUserId,
+      'lat': pos.latitude,
+      'lng': pos.longitude,
+      'speed': pos.speed,
+      'timestamp': FieldValue.serverTimestamp(),
+      'lastUpdate': now, // 兼容 Admin 端的在线/离线逻辑
+    });
 
     try {
-      await FirebaseFirestore.instance.collection('tracking_logs').add({
-        'uid': _currentUserId,
-        'lat': pos.latitude,
-        'lng': pos.longitude,
-        'speed': pos.speed, 
-        'heading': pos.heading,
-        'timestamp': FieldValue.serverTimestamp(),
-        'date': todayStr,
-        'lastUpdate': now, 
-      });
-      
-      // 🟢 更新“上次上传点”为当前点
+      await batch.commit();
       _lastUploadedPosition = pos;
-      
-      debugPrint("📍 Location uploaded (Moved > 200m)");
+      debugPrint("📍 Double Upload Success (> 200m)");
     } catch (e) {
       debugPrint("Error uploading location: $e");
     }
@@ -170,12 +180,9 @@ class TrackingService {
         Timestamp endTs = data['end']; 
         DateTime shiftEnd = endTs.toDate();
 
-        // 班次结束后 1 小时停止
         forceStopTime = shiftEnd.add(const Duration(hours: 1));
         debugPrint("📅 Shift Ends: ${DateFormat('HH:mm').format(shiftEnd)} | Auto-Stop: ${DateFormat('HH:mm').format(forceStopTime)}");
-
       } else {
-        // 后备方案: 12小时后停止
         forceStopTime = now.add(const Duration(hours: 12));
         debugPrint("⚠️ No schedule found. Defaulting to 12-hour timeout.");
       }
