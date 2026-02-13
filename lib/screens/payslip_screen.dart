@@ -2,11 +2,16 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:open_filex/open_filex.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:http/http.dart' as http;
+
+// 🟢 导入生物识别服务
+import '../services/biometric_service.dart';
 
 class PayslipScreen extends StatefulWidget {
   const PayslipScreen({super.key});
@@ -18,26 +23,70 @@ class PayslipScreen extends StatefulWidget {
 class _PayslipScreenState extends State<PayslipScreen> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   bool _isGenerating = false;
+  String _loadingText = "Processing...";
+
+  // --- Salary Advance Form Controllers ---
+  final TextEditingController _amountCtrl = TextEditingController();
+  final TextEditingController _reasonCtrl = TextEditingController();
+  bool _agreedToDeduction = false;
+
+  @override
+  void dispose() {
+    _amountCtrl.dispose();
+    _reasonCtrl.dispose();
+    super.dispose();
+  }
+
+  // 🟢 核心功能：打开敏感文档前的生物识别验证
+  Future<void> _openSecuredDocument(Function onAuthenticated) async {
+    bool success = await BiometricService().authenticateStaff();
+    
+    if (success) {
+      onAuthenticated(); // 验证成功，执行打开操作
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Authentication required to view sensitive documents."),
+            backgroundColor: Colors.red,
+          )
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final user = _auth.currentUser;
 
-    return Scaffold(
-      backgroundColor: Colors.grey[100],
-      appBar: AppBar(
-        title: Text("home.payslip".tr()), 
-        backgroundColor: Colors.white,
-        elevation: 0.5,
-        foregroundColor: Colors.black,
-      ),
-      body: Stack(
-        children: [
-          if (user == null) 
-            const Center(child: Text("Please login first")),
+    if (user == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text("Payslip & Advance")),
+        body: const Center(child: Text("Please login first")),
+      );
+    }
 
-          if (user != null)
-            // 🟢 第一步：先通过 authUid 找到用户的 Profile ID (Document ID)
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: Colors.grey[100],
+        appBar: AppBar(
+          title: Text("home.payslip".tr()), 
+          backgroundColor: Colors.white,
+          elevation: 0.5,
+          foregroundColor: Colors.black,
+          bottom: const TabBar(
+            labelColor: Colors.blue,
+            unselectedLabelColor: Colors.grey,
+            indicatorColor: Colors.blue,
+            tabs: [
+              Tab(icon: Icon(Icons.folder_shared), text: "My Documents"),
+              Tab(icon: Icon(Icons.request_quote), text: "Request Advance"),
+            ],
+          ),
+        ),
+        body: Stack(
+          children: [
             FutureBuilder<QuerySnapshot>(
               future: FirebaseFirestore.instance
                   .collection('users')
@@ -48,86 +97,130 @@ class _PayslipScreenState extends State<PayslipScreen> {
                 if (userSnap.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
                 }
-                
-                if (userSnap.hasError) {
-                   return Center(child: Text("Error: ${userSnap.error}"));
-                }
-
                 if (!userSnap.hasData || userSnap.data!.docs.isEmpty) {
                   return const Center(child: Text("Profile not linked. Contact Admin."));
                 }
 
-                // 获取 Admin 端使用的真实文档 ID
-                final String profileId = userSnap.data!.docs.first.id;
+                final profileDoc = userSnap.data!.docs.first;
+                final profileId = profileDoc.id;
+                final userData = profileDoc.data() as Map<String, dynamic>;
 
-                // 🟢 第二步：用 Profile ID 查询薪资单
-                return StreamBuilder<QuerySnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('payslips')
-                      .where('uid', isEqualTo: profileId) // 使用正确的 ID 查询
-                      .where('status', isEqualTo: 'Published')
-                      .snapshots(),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
+                return TabBarView(
+                  children: [
+                    // --- TAB 1: PAYSLIPS & ADVANCE RECORDS ---
+                    _buildDocumentsTab(profileId, user.uid),
 
-                    if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                      return Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.description_outlined, size: 80, color: Colors.grey[300]),
-                            const SizedBox(height: 10),
-                            const Text("No payslips found", style: TextStyle(color: Colors.grey)),
-                          ],
-                        ),
-                      );
-                    }
-
-                    // 排序：月份倒序 (最新的在上面)
-                    final docs = snapshot.data!.docs;
-                    docs.sort((a, b) {
-                      final monthA = (a.data() as Map<String, dynamic>)['month'] ?? '';
-                      final monthB = (b.data() as Map<String, dynamic>)['month'] ?? '';
-                      return monthB.compareTo(monthA);
-                    });
-
-                    return ListView.builder(
-                      padding: const EdgeInsets.all(16),
-                      itemCount: docs.length,
-                      itemBuilder: (context, index) {
-                        final data = docs[index].data() as Map<String, dynamic>;
-                        return _buildPayslipCard(data);
-                      },
-                    );
-                  },
+                    // --- TAB 2: REQUEST FORM ---
+                    _buildAdvanceRequestTab(profileId, userData, user.uid),
+                  ],
                 );
               },
             ),
-          
-          // Loading Overlay
-          if (_isGenerating)
-            Container(
-              color: Colors.black45,
-              child: const Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(color: Colors.white),
-                    SizedBox(height: 16),
-                    Text("Generating PDF...", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
-                  ],
+
+            // Loading Overlay 
+            if (_isGenerating)
+              Container(
+                color: Colors.black45,
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(color: Colors.white),
+                      const SizedBox(height: 16),
+                      Text(_loadingText, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+                    ],
+                  ),
                 ),
-              ),
-            )
+              )
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // TAB 1: DOCUMENTS (PAYSLIPS + RECORDS)
+  // ===========================================================================
+
+  Widget _buildDocumentsTab(String profileId, String authUid) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Section 1: Payslips
+          const Text("Monthly Payslips", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('payslips')
+                .where('uid', isEqualTo: profileId)
+                .where('status', isEqualTo: 'Published')
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(child: Text("No payslips found.", style: TextStyle(color: Colors.grey))),
+                );
+              }
+
+              final docs = snapshot.data!.docs;
+              docs.sort((a, b) {
+                final mA = (a.data() as Map<String, dynamic>)['month'] ?? '';
+                final mB = (b.data() as Map<String, dynamic>)['month'] ?? '';
+                return mB.compareTo(mA);
+              });
+
+              return ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: docs.length,
+                itemBuilder: (context, index) {
+                  return _buildPayslipCard(docs[index].data() as Map<String, dynamic>);
+                },
+              );
+            },
+          ),
+
+          const SizedBox(height: 30),
+
+          // Section 2: Salary Advance Records
+          const Text("Salary Advance Records", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('salary_advances')
+                .where('authUid', isEqualTo: authUid)
+                .orderBy('appliedAt', descending: true)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 20),
+                  child: Center(child: Text("No advance requests found.", style: TextStyle(color: Colors.grey))),
+                );
+              }
+
+              return ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: snapshot.data!.docs.length,
+                itemBuilder: (context, index) {
+                  final data = snapshot.data!.docs[index].data() as Map<String, dynamic>;
+                  return _buildAdvanceRecordCard(data);
+                },
+              );
+            },
+          )
         ],
       ),
     );
   }
 
+  // --- CARDS ---
+
   Widget _buildPayslipCard(Map<String, dynamic> data) {
-    // 格式化月份 "2026-02" -> "February 2026"
     final dateObj = DateTime.tryParse("${data['month']}-01");
     final monthStr = dateObj != null ? DateFormat('MMMM yyyy').format(dateObj) : data['month'];
     final netPay = (data['net'] ?? 0).toDouble();
@@ -135,43 +228,32 @@ class _PayslipScreenState extends State<PayslipScreen> {
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: Colors.grey.shade300),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey.shade300)),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () => _generateAndOpenPdf(data), // 点击下载 PDF
+        // 🟢 加入生物识别验证
+        onTap: () => _openSecuredDocument(() => _generateAndOpenPayslipPdf(data)), 
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Row(
             children: [
               Container(
                 padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.blue[50],
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(Icons.picture_as_pdf, color: Colors.blue),
+                decoration: BoxDecoration(color: Colors.blue[50], borderRadius: BorderRadius.circular(10)),
+                child: const Icon(Icons.receipt_long, color: Colors.blue),
               ),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      monthStr,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                    ),
+                    Text(monthStr, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     const SizedBox(height: 4),
-                    Text(
-                      "Net Pay: RM ${netPay.toStringAsFixed(2)}",
-                      style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
-                    ),
+                    Text("Net Pay: RM ${netPay.toStringAsFixed(2)}", style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
-              const Icon(Icons.download, color: Colors.grey),
+              const Icon(Icons.lock_outline, color: Colors.grey, size: 20), // 提示需解锁
             ],
           ),
         ),
@@ -179,14 +261,295 @@ class _PayslipScreenState extends State<PayslipScreen> {
     );
   }
 
-  // 📄 核心：生成 PDF 并打开
-  Future<void> _generateAndOpenPdf(Map<String, dynamic> data) async {
-    setState(() => _isGenerating = true);
+  Widget _buildAdvanceRecordCard(Map<String, dynamic> data) {
+    final amount = (data['amount'] ?? 0).toDouble();
+    final status = data['status'] ?? 'Pending';
+    final dateStr = data['appliedAt'] != null 
+        ? DateFormat('dd MMM yyyy').format((data['appliedAt'] as Timestamp).toDate()) 
+        : '-';
+    
+    Color statusColor = Colors.orange;
+    if (status == 'Approved') statusColor = Colors.green;
+    if (status == 'Rejected') statusColor = Colors.red;
+
+    return Card(
+      elevation: 0,
+      margin: const EdgeInsets.only(bottom: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: Colors.grey.shade300)),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(color: Colors.purple.shade50, borderRadius: BorderRadius.circular(8)),
+          child: const Icon(Icons.account_balance_wallet, color: Colors.purple),
+        ),
+        title: Text("RM ${amount.toStringAsFixed(2)}", style: const TextStyle(fontWeight: FontWeight.bold)),
+        subtitle: Text(dateStr, style: const TextStyle(fontSize: 12)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(color: statusColor.withValues(alpha:0.1), borderRadius: BorderRadius.circular(6)),
+              child: Text(status, style: TextStyle(color: statusColor, fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+            if (data['pdfUrl'] != null) ...[
+              const SizedBox(width: 8),
+              // 🟢 加入生物识别验证来查看借据 PDF
+              IconButton(
+                icon: const Icon(Icons.picture_as_pdf, color: Colors.redAccent),
+                onPressed: () => _openSecuredDocument(() => _downloadAndOpenIouPdf(data['pdfUrl'], data['appliedAt'])),
+              )
+            ]
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // TAB 2: REQUEST ADVANCE FORM
+  // ===========================================================================
+
+  Widget _buildAdvanceRequestTab(String profileId, Map<String, dynamic> userData, String authUid) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Card(
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey.shade300)),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text("Request Salary Advance", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              const SizedBox(height: 8),
+              const Text("Submit an I.O.U request. If approved, this amount will be deducted from your next payslip. A formal PDF will be generated.", style: TextStyle(color: Colors.grey, fontSize: 13)),
+              const SizedBox(height: 20),
+              
+              TextField(
+                controller: _amountCtrl,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: InputDecoration(
+                  labelText: "Amount",
+                  prefixText: "RM ",
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              TextField(
+                controller: _reasonCtrl,
+                maxLines: 2,
+                decoration: InputDecoration(
+                  labelText: "Reason",
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.shade200)
+                ),
+                child: CheckboxListTile(
+                  value: _agreedToDeduction,
+                  onChanged: (val) => setState(() => _agreedToDeduction = val ?? false),
+                  title: const Text(
+                    "I formally agree that this requested amount will be fully deducted from my upcoming salary.",
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87),
+                  ),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  activeColor: Colors.orange,
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white),
+                  onPressed: () => _submitAdvanceRequest(profileId, userData, authUid),
+                  icon: const Icon(Icons.gavel, size: 18),
+                  label: const Text("Generate I.O.U & Submit", style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- LOGIC: Submit Advance Request ---
+  Future<void> _submitAdvanceRequest(String profileId, Map<String, dynamic> userData, String authUid) async {
+    final amountText = _amountCtrl.text.trim();
+    final reason = _reasonCtrl.text.trim();
+
+    if (amountText.isEmpty || double.tryParse(amountText) == null || double.parse(amountText) <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please enter a valid amount.")));
+      return;
+    }
+    if (reason.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please provide a reason.")));
+      return;
+    }
+    if (!_agreedToDeduction) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("You must agree to the deduction terms.")));
+      return;
+    }
+
+    setState(() { _isGenerating = true; _loadingText = "Generating Agreement PDF..."; });
+    
+    final double amount = double.parse(amountText);
+    final staffName = userData['personal']?['name'] ?? 'Unknown Staff';
+    final icNo = userData['personal']?['icNumber'] ?? 'N/A';
+    final staffCode = userData['empCode'] ?? 'N/A';
+
+    try {
+      final pdf = pw.Document();
+      final dateNow = DateTime.now();
+      final dateFormatted = DateFormat('dd MMMM yyyy').format(dateNow);
+
+      pdf.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(40),
+          build: (pw.Context context) {
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Center(child: pw.Text("SALARY ADVANCE AGREEMENT (I.O.U)", style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold))),
+                pw.SizedBox(height: 30),
+                pw.Text("Date: $dateFormatted"),
+                pw.SizedBox(height: 20),
+                pw.Text("EMPLOYEE DETAILS", style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                pw.Divider(),
+                pw.Text("Name: $staffName"),
+                pw.Text("Employee ID: $staffCode"),
+                pw.Text("IC Number: $icNo"),
+                pw.SizedBox(height: 20),
+                pw.Text("ADVANCE DETAILS", style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                pw.Divider(),
+                pw.Text("Requested Amount: RM ${amount.toStringAsFixed(2)}"),
+                pw.Text("Reason: $reason"),
+                pw.SizedBox(height: 30),
+                pw.Text("AGREEMENT", style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                pw.Divider(),
+                pw.Text(
+                  "I, $staffName (IC: $icNo), hereby acknowledge the request of a salary advance amounting to RM ${amount.toStringAsFixed(2)}.\n\n"
+                  "I authorize the company to fully deduct this amount from my upcoming salary/payroll. "
+                  "In the event of my resignation or termination prior to the deduction, I agree that this amount will be deducted from my final pay or I will reimburse the company immediately.",
+                  style: const pw.TextStyle(lineSpacing: 1.5),
+                ),
+                pw.SizedBox(height: 50),
+                pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                  children: [
+                    pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.center,
+                      children: [
+                        pw.Text("___________________________"),
+                        pw.SizedBox(height: 5),
+                        pw.Text("Employee E-Signature / Confirmation"),
+                        pw.Text("Confirmed via App on $dateFormatted", style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey)),
+                      ]
+                    ),
+                    pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.center,
+                      children: [
+                        pw.Text("___________________________"),
+                        pw.SizedBox(height: 5),
+                        pw.Text("Management Approval"),
+                      ]
+                    )
+                  ]
+                )
+              ]
+            );
+          }
+        )
+      );
+
+      final pdfBytes = await pdf.save();
+
+      setState(() => _loadingText = "Uploading Document...");
+      final fileName = 'iou_${authUid}_${dateNow.millisecondsSinceEpoch}.pdf';
+      final storageRef = FirebaseStorage.instance.ref().child('salary_advances').child(fileName);
+      
+      final uploadTask = storageRef.putData(pdfBytes, SettableMetadata(contentType: 'application/pdf'));
+      final snapshot = await uploadTask;
+      final downloadUrl = await snapshot.ref.getDownloadURL();
+
+      setState(() => _loadingText = "Submitting Request...");
+      await FirebaseFirestore.instance.collection('salary_advances').add({
+        'uid': profileId,
+        'authUid': authUid,
+        'empName': staffName,
+        'empCode': staffCode,
+        'amount': amount,
+        'reason': reason,
+        'status': 'Pending',
+        'pdfUrl': downloadUrl,
+        'appliedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (mounted) {
+        setState(() {
+          _isGenerating = false;
+          _amountCtrl.clear();
+          _reasonCtrl.clear();
+          _agreedToDeduction = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Advance request submitted successfully!"), backgroundColor: Colors.green));
+        // Switch back to tab 1 automatically to see the pending record
+        DefaultTabController.of(context).animateTo(0);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isGenerating = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Failed to submit: $e"), backgroundColor: Colors.red));
+      }
+    }
+  }
+
+  // ===========================================================================
+  // PDF HELPERS (Download IOU & Generate Payslip)
+  // ===========================================================================
+
+  // 🟢 下载并打开 I.O.U 借据
+  Future<void> _downloadAndOpenIouPdf(String url, dynamic timestamp) async {
+    setState(() { _isGenerating = true; _loadingText = "Decrypting Document..."; });
+    try {
+      final response = await http.get(Uri.parse(url));
+      final output = await getTemporaryDirectory();
+      
+      final timeSuffix = timestamp != null ? (timestamp as Timestamp).seconds.toString() : 'temp';
+      final file = File("${output.path}/IOU_$timeSuffix.pdf");
+      
+      await file.writeAsBytes(response.bodyBytes);
+      if (mounted) {
+        setState(() => _isGenerating = false);
+        await OpenFilex.open(file.path);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isGenerating = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Failed to open document: $e")));
+      }
+    }
+  }
+
+  // 🟢 在本地排版并打开薪资单
+  Future<void> _generateAndOpenPayslipPdf(Map<String, dynamic> data) async {
+    setState(() { _isGenerating = true; _loadingText = "Decrypting Payslip..."; });
 
     try {
       final pdf = pw.Document();
 
-      // 提取数据
       final basic = (data['basic'] ?? 0).toDouble();
       final earnings = data['earnings'] as Map<String, dynamic>? ?? {};
       final deductions = data['deductions'] as Map<String, dynamic>? ?? {};
@@ -203,7 +566,6 @@ class _PayslipScreenState extends State<PayslipScreen> {
             return pw.Column(
               crossAxisAlignment: pw.CrossAxisAlignment.start,
               children: [
-                // 1. Header
                 pw.Header(
                   level: 0,
                   child: pw.Column(
@@ -221,30 +583,24 @@ class _PayslipScreenState extends State<PayslipScreen> {
                   ),
                 ),
                 pw.SizedBox(height: 20),
-
-                // 2. Info Grid
                 pw.Row(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
-                    // Left Col
                     pw.Expanded(
                       child: pw.Column(
                         children: [
                           _buildPdfRow("Employee Name", data['staffName']),
                           _buildPdfRow("Department", data['department']),
                           _buildPdfRow("Employee Code", data['staffCode']),
-                          _buildPdfRow("Pay Group", data['payGroup']),
                         ],
                       ),
                     ),
                     pw.SizedBox(width: 20),
-                    // Right Col
                     pw.Expanded(
                       child: pw.Column(
                         children: [
                           _buildPdfRow("IC Number", data['icNo']),
                           _buildPdfRow("EPF Number", data['epfNo']),
-                          _buildPdfRow("SOCSO Number", data['socsoNo']),
                           _buildPdfRow("Pay Period", data['period']),
                         ],
                       ),
@@ -252,8 +608,6 @@ class _PayslipScreenState extends State<PayslipScreen> {
                   ],
                 ),
                 pw.SizedBox(height: 20),
-
-                // 3. Finance Table (Headers)
                 pw.Container(
                   decoration: const pw.BoxDecoration(border: pw.Border(top: pw.BorderSide(), bottom: pw.BorderSide())),
                   padding: const pw.EdgeInsets.symmetric(vertical: 5),
@@ -268,12 +622,9 @@ class _PayslipScreenState extends State<PayslipScreen> {
                   ),
                 ),
                 pw.SizedBox(height: 5),
-
-                // 4. Finance Body
                 pw.Row(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
-                    // Earnings Column
                     pw.Expanded(
                       child: pw.Column(
                         children: [
@@ -285,16 +636,14 @@ class _PayslipScreenState extends State<PayslipScreen> {
                       ),
                     ),
                     pw.SizedBox(width: 20),
-                    // Deductions Column
                     pw.Expanded(
                       child: pw.Column(
                         children: [
                           _buildLineItem("EPF (Employee)", (deductions['epf'] ?? 0).toDouble()),
                           _buildLineItem("SOCSO (Employee)", (deductions['socso'] ?? 0).toDouble()),
                           _buildLineItem("EIS (Employee)", (deductions['eis'] ?? 0).toDouble()),
-                          if ((deductions['tax'] ?? 0) > 0) _buildLineItem("PCB / TAX", (deductions['tax']).toDouble()),
-                          // 🟢 增加迟到扣款
                           if ((deductions['late'] ?? 0) > 0) _buildLineItem("LATE DEDUCTION", (deductions['late']).toDouble(), isDeduction: true),
+                          if ((deductions['advance'] ?? 0) > 0) _buildLineItem("SALARY ADVANCE", (deductions['advance']).toDouble(), isDeduction: true),
                         ],
                       ),
                     ),
@@ -302,8 +651,6 @@ class _PayslipScreenState extends State<PayslipScreen> {
                 ),
                 pw.SizedBox(height: 10),
                 pw.Divider(),
-
-                // 5. Totals
                 pw.Row(
                   children: [
                     pw.Expanded(
@@ -328,8 +675,6 @@ class _PayslipScreenState extends State<PayslipScreen> {
                   ],
                 ),
                 pw.SizedBox(height: 20),
-
-                // 6. Net Pay & Employer
                 pw.Container(
                   padding: const pw.EdgeInsets.all(10),
                   decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300)),
@@ -341,40 +686,17 @@ class _PayslipScreenState extends State<PayslipScreen> {
                         children: [
                           _buildEmployerRow("Employer EPF", data['employer_epf']),
                           _buildEmployerRow("Employer SOCSO", data['employer_socso']),
-                          _buildEmployerRow("Employer EIS", data['employer_eis']),
                         ],
                       ),
                       pw.Column(
                         crossAxisAlignment: pw.CrossAxisAlignment.end,
                         children: [
-                          pw.Text("NET WAGES", style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700)),
+                          pw.Text("NET PAY", style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700)),
                           pw.Text("RM ${net.toStringAsFixed(2)}", style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 18, color: PdfColors.black)),
                         ],
                       ),
                     ],
                   ),
-                ),
-
-                // 7. Attendance Stats (Optional)
-                if (data['attendanceStats'] != null) ...[
-                  pw.SizedBox(height: 10),
-                  pw.Container(
-                    padding: const pw.EdgeInsets.all(5),
-                    decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey300)),
-                    child: pw.Row(
-                      mainAxisAlignment: pw.MainAxisAlignment.spaceAround,
-                      children: [
-                        pw.Text("Work Days: ${data['attendanceStats']['actDays']}", style: const pw.TextStyle(fontSize: 8)),
-                        pw.Text("OT Hours: ${data['attendanceStats']['ot']}", style: const pw.TextStyle(fontSize: 8)),
-                        pw.Text("Late: ${data['attendanceStats']['late']}m", style: const pw.TextStyle(fontSize: 8)),
-                      ],
-                    )
-                  ),
-                ],
-
-                pw.SizedBox(height: 30),
-                pw.Center(
-                  child: pw.Text("This is a computer generated document. No signature is required.", style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey500))
                 ),
               ],
             );
@@ -382,7 +704,6 @@ class _PayslipScreenState extends State<PayslipScreen> {
         ),
       );
 
-      // Save & Open
       final output = await getTemporaryDirectory();
       final file = File("${output.path}/Payslip_${data['month']}.pdf");
       await file.writeAsBytes(await pdf.save());
@@ -391,9 +712,7 @@ class _PayslipScreenState extends State<PayslipScreen> {
         setState(() => _isGenerating = false);
         await OpenFilex.open(file.path);
       }
-
     } catch (e) {
-      debugPrint("PDF Error: $e");
       if (mounted) {
         setState(() => _isGenerating = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Failed to generate PDF: $e")));
@@ -401,7 +720,7 @@ class _PayslipScreenState extends State<PayslipScreen> {
     }
   }
 
-  // PDF Helpers
+  // --- PDF Build Helpers ---
   pw.Widget _buildPdfRow(String label, dynamic value) {
     return pw.Padding(
       padding: const pw.EdgeInsets.only(bottom: 2),
