@@ -3,17 +3,20 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // 📦 新增
-import 'notification_service.dart'; // 📦 新增
+import 'package:shared_preferences/shared_preferences.dart';
+import 'notification_service.dart';
 
 class TrackingService {
   StreamSubscription<Position>? _positionStream;
   String? _currentUserId;
   
-  // 🟢 UI Notifier: 监听此变量以更新 UI 开关状态
-  final ValueNotifier<bool> isTrackingNotifier = ValueNotifier(false);
+  // 🟢 新增：记录上一次成功上传的位置
+  Position? _lastUploadedPosition;
+  
+  // 🟢 阈值设置：200米
+  static const double _uploadDistanceFilter = 200.0;
 
-  // ⏰ 自动停止定时器 (安全/隐私)
+  final ValueNotifier<bool> isTrackingNotifier = ValueNotifier(false);
   Timer? _autoStopTimer;
 
   static final TrackingService _instance = TrackingService._internal();
@@ -28,7 +31,6 @@ class TrackingService {
       final now = DateTime.now();
       final todayStr = DateFormat('yyyy-MM-dd').format(now);
 
-      // 1. 获取用户今日的出勤记录
       final q = await FirebaseFirestore.instance
           .collection('attendance')
           .where('uid', isEqualTo: authUid)
@@ -37,7 +39,6 @@ class TrackingService {
 
       if (q.docs.isNotEmpty) {
         final data = q.docs.first.data();
-        // 只有当状态是 "Clocked In" 且没有 "Clock Out" 时才恢复追踪
         if (data['clockIn'] != null && data['clockOut'] == null) {
           debugPrint("🔄 Resuming tracking session for $authUid");
           startTracking(authUid);
@@ -50,7 +51,7 @@ class TrackingService {
 
   /// ▶️ 开始追踪
   Future<void> startTracking(String userId) async {
-    if (isTrackingNotifier.value) return; // 防止重复启动
+    if (isTrackingNotifier.value) return; 
 
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
@@ -59,8 +60,8 @@ class TrackingService {
 
     if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
       _currentUserId = userId;
+      _lastUploadedPosition = null; // 🟢 每次开始前重置上次上传点
       
-      // 🔔 [新增] 检查设置并显示通知
       final prefs = await SharedPreferences.getInstance();
       final bool shouldNotify = prefs.getBool('notifications_enabled') ?? true;
       
@@ -68,7 +69,8 @@ class TrackingService {
         await NotificationService().showTrackingNotification();
       }
 
-      // 配置定位参数 (距离过滤器: 10米)
+      // 🟢 这里的 filter 保持较小 (如 10m)，让 Stream 保持活跃，
+      // 具体的上传逻辑由 _uploadLocation 里的 200m 阈值控制。
       const LocationSettings locationSettings = LocationSettings(
         accuracy: LocationAccuracy.high,
         distanceFilter: 10, 
@@ -80,7 +82,7 @@ class TrackingService {
       });
 
       isTrackingNotifier.value = true;
-      _scheduleAutoStop(userId); // 启动自动停止计时器
+      _scheduleAutoStop(userId); 
       debugPrint("✅ Tracking Started");
     } else {
       debugPrint("❌ Location permission denied");
@@ -93,17 +95,33 @@ class TrackingService {
     _positionStream = null;
     _autoStopTimer?.cancel();
     _currentUserId = null;
+    _lastUploadedPosition = null; // 🟢 清除缓存位置
     isTrackingNotifier.value = false;
     
-    // 🔕 [新增] 移除通知
     await NotificationService().cancelTrackingNotification();
     
     debugPrint("🛑 Tracking Stopped");
   }
 
-  /// ☁️ 上传位置到 Firestore
+  /// ☁️ 上传位置到 Firestore (带手动距离过滤)
   Future<void> _uploadLocation(Position pos) async {
     if (_currentUserId == null) return;
+
+    // 🟢 核心逻辑：手动距离过滤 (200米)
+    if (_lastUploadedPosition != null) {
+      double distance = Geolocator.distanceBetween(
+        _lastUploadedPosition!.latitude,
+        _lastUploadedPosition!.longitude,
+        pos.latitude,
+        pos.longitude,
+      );
+
+      // 如果移动距离小于 200 米，直接忽略，不上传
+      if (distance < _uploadDistanceFilter) {
+        // debugPrint("🚫 Skipped: Moved only ${distance.toStringAsFixed(1)}m");
+        return; 
+      }
+    }
 
     final now = DateTime.now();
     final todayStr = DateFormat('yyyy-MM-dd').format(now);
@@ -113,21 +131,23 @@ class TrackingService {
         'uid': _currentUserId,
         'lat': pos.latitude,
         'lng': pos.longitude,
-        'speed': pos.speed, // m/s
+        'speed': pos.speed, 
         'heading': pos.heading,
         'timestamp': FieldValue.serverTimestamp(),
-        'date': todayStr, // 用于查询索引
-        'lastUpdate': now, // 用于判断在线状态
+        'date': todayStr,
+        'lastUpdate': now, 
       });
-      // debugPrint("📍 Location uploaded: ${pos.latitude}, ${pos.longitude}");
+      
+      // 🟢 更新“上次上传点”为当前点
+      _lastUploadedPosition = pos;
+      
+      debugPrint("📍 Location uploaded (Moved > 200m)");
     } catch (e) {
       debugPrint("Error uploading location: $e");
     }
   }
 
   /// ⏰ 智能自动停止逻辑
-  /// 规则: 获取今日排班结束时间，在结束时间后1小时自动停止。
-  /// 如果没有排班，则默认12小时后停止。
   Future<void> _scheduleAutoStop(String authUid) async {
     try {
       final now = DateTime.now();
@@ -138,7 +158,6 @@ class TrackingService {
           .where('date', isEqualTo: todayStr)
           .get();
 
-      // 在内存中过滤当前用户的排班
       var mySchedule = schedSnap.docs.where((doc) {
         final data = doc.data();
         return data['userId'] == authUid || data['userId'] == _currentUserId; 
@@ -151,7 +170,7 @@ class TrackingService {
         Timestamp endTs = data['end']; 
         DateTime shiftEnd = endTs.toDate();
 
-        // 规则: 班次结束后 1 小时停止
+        // 班次结束后 1 小时停止
         forceStopTime = shiftEnd.add(const Duration(hours: 1));
         debugPrint("📅 Shift Ends: ${DateFormat('HH:mm').format(shiftEnd)} | Auto-Stop: ${DateFormat('HH:mm').format(forceStopTime)}");
 
@@ -164,7 +183,6 @@ class TrackingService {
       final duration = forceStopTime.difference(DateTime.now());
 
       if (duration.isNegative) {
-        // 如果已经过了时间，1小时后强制停止
         _autoStopTimer = Timer(const Duration(hours: 1), stopTracking);
       } else {
         _autoStopTimer = Timer(duration, () {

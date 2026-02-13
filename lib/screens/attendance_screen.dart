@@ -124,7 +124,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 }
 
 // ==========================================
-//  Tab 1: Action Tab
+//  Tab 1: Action Tab (Optimized)
 // ==========================================
 
 class AttendanceActionTab extends StatefulWidget {
@@ -537,93 +537,166 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
     return action;
   }
 
+  // 🟢🟢🟢 NEW OPTIMIZED SUBMISSION LOGIC 🟢🟢🟢
+
+  // 1. Initial Trigger: Updates UI immediately, then runs background task
   Future<void> _submitAttendance() async {
     if (_capturedPhoto == null) return;
 
-    setState(() => _isLoading = true);
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    try {
-      Position? position = await _determinePosition();
-      if (position == null) throw "GPS Signal Lost. Cannot submit.";
-      await _getAddressFromLatLng(position);
+    // Capture state immediately (Snapshoting data)
+    final XFile photoFile = _capturedPhoto!;
+    final String action = _selectedAction;
+    final DateTime actionTime = DateTime.now(); // 🔒 Lock the time here
+    final String uid = user.uid;
+    final String email = user.email ?? "";
+    final String name = _staffName;
 
-      String fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
+    // Optimistic UI Update: Clear photo & show "Queued" message
+    setState(() {
+      _capturedPhoto = null;
+      _isLoading = false;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text("att.msg_queueing".tr(args: [_getActionDisplayText(action)])), // "Submitting in background..."
+      backgroundColor: Colors.blue,
+      duration: const Duration(seconds: 2),
+    ));
+
+    // Fire and forget (don't await)
+    _processUploadWithRetry(
+      uid: uid,
+      email: email,
+      name: name,
+      file: photoFile,
+      action: action,
+      timestamp: actionTime,
+    );
+  }
+
+  // 2. Background Process with Retry Logic
+  Future<void> _processUploadWithRetry({
+    required String uid,
+    required String email,
+    required String name,
+    required XFile file,
+    required String action,
+    required DateTime timestamp,
+    int attempt = 1,
+  }) async {
+    try {
+      // Step A: Get High Accuracy Location (Can take 2-5s)
+      Position? position = await _determinePosition();
+      if (position == null) throw "GPS Signal Lost";
+
+      // Step B: Get Address String (Helper function needed to avoid UI setState)
+      String addressStr = await _fetchAddressString(position);
+
+      // Step C: Upload Photo
+      String fileName = '${timestamp.millisecondsSinceEpoch}.jpg';
       Reference ref = FirebaseStorage.instance
           .ref()
           .child('attendance_photos')
-          .child(user.uid)
+          .child(uid)
           .child(fileName);
-      await ref.putFile(File(_capturedPhoto!.path));
+      
+      await ref.putFile(File(file.path));
       String photoUrl = await ref.getDownloadURL();
 
-      final now = DateTime.now();
-      final todayStr = DateFormat('yyyy-MM-dd').format(now);
-      final timeStr = DateFormat('HH:mm:ss').format(now);
+      // Step D: Save to Firestore
+      final todayStr = DateFormat('yyyy-MM-dd').format(timestamp);
+      final timeStr = DateFormat('HH:mm:ss').format(timestamp);
       
-      final CollectionReference attCollection = FirebaseFirestore.instance.collection('attendance');
-
       Map<String, dynamic> newRecord = {
-        'uid': user.uid,
-        'name': _staffName,
-        'email': user.email,
+        'uid': uid,
+        'name': name,
+        'email': email,
         'date': todayStr,
         'verificationStatus': "Pending", 
-        'session': _selectedAction, 
+        'session': action, 
         'location': GeoPoint(position.latitude, position.longitude),
-        'address': _currentAddress,
+        'address': addressStr,
         'photoUrl': photoUrl, 
-        'timestamp': FieldValue.serverTimestamp(),
+        'timestamp': Timestamp.fromDate(timestamp), // Use locked time
         'manualIn': null,
         'manualOut': null,
       };
 
-      if (_selectedAction == 'Clock In') {
-        newRecord['timeIn'] = FieldValue.serverTimestamp();
+      if (action == 'Clock In') {
+        newRecord['timeIn'] = Timestamp.fromDate(timestamp);
         newRecord['timeInStr'] = timeStr;
-      } else if (_selectedAction == 'Break Out') {
-        newRecord['breakOut'] = FieldValue.serverTimestamp();
-      } else if (_selectedAction == 'Break In') {
-        newRecord['breakIn'] = FieldValue.serverTimestamp();
-      } else if (_selectedAction == 'Clock Out') {
-        newRecord['timeOut'] = FieldValue.serverTimestamp();
+      } else if (action == 'Break Out') {
+        newRecord['breakOut'] = Timestamp.fromDate(timestamp);
+      } else if (action == 'Break In') {
+        newRecord['breakIn'] = Timestamp.fromDate(timestamp);
+      } else if (action == 'Clock Out') {
+        newRecord['timeOut'] = Timestamp.fromDate(timestamp);
         newRecord['timeOutStr'] = timeStr;
       }
 
-      await attCollection.add(newRecord);
+      await FirebaseFirestore.instance.collection('attendance').add(newRecord);
 
-      final uid = user.uid;
-      if (_selectedAction == 'Clock In') {
-        await TrackingService().startTracking(uid);
-      } 
-      else if (_selectedAction == 'Break Out') {
-        await TrackingService().stopTracking();
-      }
-      else if (_selectedAction == 'Break In') {
-        await TrackingService().startTracking(uid);
-      }
-      else if (_selectedAction == 'Clock Out') {
-        await TrackingService().stopTracking();
+      // Step E: Trigger Tracking Service
+      if (action == 'Clock In') {
+        TrackingService().startTracking(uid);
+      } else if (action == 'Break Out') {
+        TrackingService().stopTracking();
+      } else if (action == 'Break In') {
+        TrackingService().startTracking(uid);
+      } else if (action == 'Clock Out') {
+        TrackingService().stopTracking();
       }
 
+      // Final Success Notification
       if (mounted) {
-        String actionDisplay = _getActionDisplayText(_selectedAction);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text("att.msg_submitted".tr(args: [actionDisplay])),
+            content: Text("att.msg_success".tr()), // "Submission Successful"
             backgroundColor: Colors.green));
-        setState(() {
-          _capturedPhoto = null;
-        });
       }
+
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
+      debugPrint("Upload failed (Attempt $attempt): $e");
+      
+      if (attempt < 3) {
+        // Retry logic: Wait 3s, 6s, then fail
+        int delay = attempt * 3;
+        await Future.delayed(Duration(seconds: delay));
+        _processUploadWithRetry(
+          uid: uid, email: email, name: name, 
+          file: file, action: action, timestamp: timestamp, 
+          attempt: attempt + 1
+        );
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("Upload Failed. Please check connection."), 
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // Helper to fetch address string without updating UI state
+  Future<String> _fetchAddressString(Position position) async {
+    try {
+      List<Placemark> placemarks = await placemarkFromCoordinates(position.latitude, position.longitude);
+      if (placemarks.isNotEmpty) {
+        Placemark place = placemarks[0];
+        List<String> parts = [
+          place.name ?? "", place.subThoroughfare ?? "", place.thoroughfare ?? "",
+          place.subLocality ?? "", place.locality ?? "", place.postalCode ?? "",
+          place.administrativeArea ?? "", place.country ?? ""
+        ];
+        return parts.where((p) => p.isNotEmpty).toSet().join(", ");
+      }
+    } catch (e) { /* ignore */ }
+    return "GPS: ${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}";
   }
 
   @override
@@ -1043,6 +1116,18 @@ class _ScheduleTabState extends State<ScheduleTab> {
                       String lateStr = "0h 0m";
                       String underStr = "0h 0m";
                       String otStr = "0h 0m";
+                      
+                      // 🟢 ABSENT LOGIC
+                      bool isAbsent = false;
+                      final now = DateTime.now();
+                      final scheduleDate = DateTime.parse(dateStr);
+                      // Compare dates only (ignore time)
+                      final today = DateTime(now.year, now.month, now.day);
+                      final checkDate = DateTime(scheduleDate.year, scheduleDate.month, scheduleDate.day);
+                      
+                      if (checkDate.isBefore(today)) {
+                         isAbsent = true; // Assume absent if past date
+                      }
 
                       if (attSnapshot.hasData && attSnapshot.data!.docs.isNotEmpty) {
                         final docs = attSnapshot.data!.docs;
@@ -1050,6 +1135,10 @@ class _ScheduleTabState extends State<ScheduleTab> {
                           final data = d.data() as Map<String, dynamic>;
                           return data['verificationStatus'] == 'Verified';
                         }).toList();
+                        
+                        if (verifiedDocs.isNotEmpty) {
+                            isAbsent = false; // Not absent if records found
+                        }
 
                         QueryDocumentSnapshot? clockInDoc;
                         try { clockInDoc = verifiedDocs.firstWhere((d) => (d.data() as Map<String,dynamic>)['session'] == 'Clock In'); } catch (e) { clockInDoc = null; }
@@ -1066,7 +1155,6 @@ class _ScheduleTabState extends State<ScheduleTab> {
                            status = "Working";
                            statusColor = Colors.blue;
                            
-                           // Calculate Late (Strict: Actual In - Sched Start)
                            if (schedStart != null && ts.isAfter(schedStart)) {
                              lateStr = _formatDuration(ts.difference(schedStart));
                            }
@@ -1079,12 +1167,9 @@ class _ScheduleTabState extends State<ScheduleTab> {
                            statusColor = Colors.green;
                            
                            if (schedEnd != null) {
-                             // Calculate Overtime (Actual Out - Sched End)
                              if (ts.isAfter(schedEnd)) {
                                otStr = _formatDuration(ts.difference(schedEnd));
-                             } 
-                             // Calculate Undertime (Sched End - Actual Out)
-                             else if (ts.isBefore(schedEnd)) {
+                             } else if (ts.isBefore(schedEnd)) {
                                underStr = _formatDuration(schedEnd.difference(ts));
                              }
                            }
@@ -1095,7 +1180,7 @@ class _ScheduleTabState extends State<ScheduleTab> {
                       }
 
                       return _buildScheduleCard(
-                        scheduleData, timeIn, timeOut, status, statusColor, lateStr, underStr, otStr
+                        scheduleData, timeIn, timeOut, status, statusColor, lateStr, underStr, otStr, isAbsent
                       );
                     }
                   );
@@ -1108,7 +1193,7 @@ class _ScheduleTabState extends State<ScheduleTab> {
     );
   }
   
-  Widget _buildScheduleCard(Map<String, dynamic> scheduleData, String inTime, String outTime, String status, Color color, String late, String under, String ot) {
+  Widget _buildScheduleCard(Map<String, dynamic> scheduleData, String inTime, String outTime, String status, Color color, String late, String under, String ot, bool isAbsent) {
     final dateObj = DateTime.parse(scheduleData['date']);
     final weekDay = DateFormat('EEEE').format(dateObj);
     final fmtDate = DateFormat('dd/MM/yyyy').format(dateObj);
@@ -1153,7 +1238,7 @@ class _ScheduleTabState extends State<ScheduleTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      if (status != "Absent") ...[
+                      if (status != "Absent" && !isAbsent) ...[
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(4)),
@@ -1171,6 +1256,18 @@ class _ScheduleTabState extends State<ScheduleTab> {
                 )
               ],
             ),
+            // 🟢 ABSENT LABEL ADDITION
+            if (isAbsent)
+               Container(
+                 margin: const EdgeInsets.only(top: 10),
+                 padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
+                 decoration: BoxDecoration(
+                   color: Colors.red.shade50,
+                   borderRadius: BorderRadius.circular(4),
+                   border: Border.all(color: Colors.red.shade200)
+                 ),
+                 child: const Text("ABSENT", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.0)),
+               )
           ],
         ),
       ),
@@ -1328,6 +1425,18 @@ class _SubmitTabState extends State<SubmitTab> {
                       String lateStr = "0h 0m";
                       String underStr = "0h 0m";
                       String otStr = "0h 0m";
+                      
+                      // 🟢 ABSENT LOGIC FOR SUBMIT TAB
+                      bool isAbsent = false;
+                      final now = DateTime.now();
+                      final scheduleDate = DateTime.parse(dateStr);
+                      // Compare dates only (ignore time)
+                      final today = DateTime(now.year, now.month, now.day);
+                      final checkDate = DateTime(scheduleDate.year, scheduleDate.month, scheduleDate.day);
+                      
+                      if (checkDate.isBefore(today)) {
+                         isAbsent = true; 
+                      }
 
                       if (attSnapshot.hasData && attSnapshot.data!.docs.isNotEmpty) {
                         final docs = attSnapshot.data!.docs;
@@ -1337,6 +1446,10 @@ class _SubmitTabState extends State<SubmitTab> {
                           final data = d.data() as Map<String, dynamic>;
                           return data['verificationStatus'] == 'Verified';
                         }).toList();
+                        
+                        if (verifiedDocs.isNotEmpty) {
+                            isAbsent = false; 
+                        }
 
                         QueryDocumentSnapshot? clockInDoc;
                         try { clockInDoc = verifiedDocs.firstWhere((d) => (d.data() as Map<String,dynamic>)['session'] == 'Clock In'); } catch (e) { clockInDoc = null; }
@@ -1372,7 +1485,7 @@ class _SubmitTabState extends State<SubmitTab> {
                       }
 
                       return _buildSubmitCard(
-                        scheduleData, attendanceId, timeIn, timeOut, lateStr, underStr, otStr
+                        scheduleData, attendanceId, timeIn, timeOut, lateStr, underStr, otStr, isAbsent
                       );
                     }
                   );
@@ -1385,7 +1498,7 @@ class _SubmitTabState extends State<SubmitTab> {
     );
   }
 
-  Widget _buildSubmitCard(Map<String, dynamic> scheduleData, String? attendanceId, String inTime, String outTime, String late, String under, String ot) {
+  Widget _buildSubmitCard(Map<String, dynamic> scheduleData, String? attendanceId, String inTime, String outTime, String late, String under, String ot, bool isAbsent) {
     final dateObj = DateTime.parse(scheduleData['date']);
     final weekDay = DateFormat('EEEE').format(dateObj);
     final fmtDate = DateFormat('dd/MM/yyyy').format(dateObj);
@@ -1452,6 +1565,18 @@ class _SubmitTabState extends State<SubmitTab> {
                   )
                 ],
               ),
+              // 🟢 ABSENT LABEL ADDITION FOR SUBMIT TAB
+              if (isAbsent)
+               Container(
+                 margin: const EdgeInsets.only(top: 10),
+                 padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
+                 decoration: BoxDecoration(
+                   color: Colors.red.shade50,
+                   borderRadius: BorderRadius.circular(4),
+                   border: Border.all(color: Colors.red.shade200)
+                 ),
+                 child: const Text("ABSENT", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.0)),
+               )
             ],
           ),
         ),

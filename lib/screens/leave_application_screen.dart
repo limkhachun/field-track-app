@@ -6,7 +6,6 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:file_picker/file_picker.dart'; 
 import 'package:easy_localization/easy_localization.dart';
 
-
 class LeaveApplicationScreen extends StatefulWidget {
   const LeaveApplicationScreen({super.key});
 
@@ -147,6 +146,28 @@ class _LeaveApplicationScreenState extends State<LeaveApplicationScreen> {
     }
   }
 
+  Future<bool> _checkForDuplicateLeave(String uid, DateTime start, DateTime end) async {
+    // 🟢 NEW: Check if any APPROVED leave overlaps with the selected dates
+    // Note: Firestore range queries are limited, so we fetch active leaves and filter in Dart for safety.
+    final q = await FirebaseFirestore.instance
+        .collection('leaves')
+        .where('authUid', isEqualTo: uid)
+        .where('status', isEqualTo: 'Approved')
+        .get();
+
+    for (var doc in q.docs) {
+      final data = doc.data();
+      DateTime existingStart = DateTime.parse(data['startDate']);
+      DateTime existingEnd = DateTime.parse(data['endDate']);
+
+      // Check overlap: (StartA <= EndB) and (EndA >= StartB)
+      if (start.isBefore(existingEnd.add(const Duration(days: 1))) && end.isAfter(existingStart.subtract(const Duration(days: 1)))) {
+        return true; // Overlap found
+      }
+    }
+    return false;
+  }
+
   Future<void> _submitApplication() async {
     if (!_formKey.currentState!.validate()) return;
     
@@ -161,8 +182,10 @@ class _LeaveApplicationScreenState extends State<LeaveApplicationScreen> {
        return;
     }
 
+    // 🟢 FIX: Handle Unpaid Leave & Null Checks safely
     if (_leaveTypeKey == 'leave.type_annual') {
-      int annualBal = _balances['annual'] ?? 0;
+      // Safely access map with null check
+      int annualBal = (_balances['annual'] is int) ? _balances['annual'] : 0;
       if (annualBal < days) {
         _showSnack("leave.error_insufficient".tr(args: [days.toString(), annualBal.toString()]));
         return;
@@ -180,7 +203,21 @@ class _LeaveApplicationScreenState extends State<LeaveApplicationScreen> {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
+      // 🟢 NEW: Duplicate Check Trigger
+      bool isDuplicate = await _checkForDuplicateLeave(user.uid, _startDate!, _endDate!);
+      if (isDuplicate) {
+        // 
+        _showSnack("You already have an approved leave for these dates.");
+        setState(() => _isLoading = false);
+        return;
+      }
+
       QuerySnapshot q = await FirebaseFirestore.instance.collection('users').where('personal.email', isEqualTo: user.email).limit(1).get();
+      // Try fetch by authUid if email fails
+      if (q.docs.isEmpty) {
+         q = await FirebaseFirestore.instance.collection('users').where('authUid', isEqualTo: user.uid).limit(1).get();
+      }
+      
       if (q.docs.isEmpty) throw "User profile not found";
       
       final userDoc = q.docs.first;
@@ -461,7 +498,6 @@ class _LeaveApplicationScreenState extends State<LeaveApplicationScreen> {
             final bool hasAttachment = data['attachmentUrl'] != null;
             final bool isPdf = (data['fileType'] ?? '').toString().contains('pdf');
 
-            // 🟢 修复：添加大括号，符合 Lint 规范
             String statusDisplay = status;
             if (status == 'Pending') {
               statusDisplay = "leave.status_pending".tr();

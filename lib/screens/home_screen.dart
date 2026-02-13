@@ -42,7 +42,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadUserData();
 
     // 2. Start Notification Listeners
-    _listenForAdminUpdates();
+    // 🟢 NEW: Activate Global Notification Listener Service
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      // 启动监听 Leave, Correction, Profile, Payslip 的变化
+      NotificationService().startListeningToUserUpdates(user.uid);
+    }
+    
+    // _listenForAdminUpdates(); // 🔴 已注释：防止与 NotificationService 重复导致双重弹窗
 
     // 3. 🟢 New: Check if biometric setup is needed
     // (Delayed slightly to avoid conflict with initial rendering)
@@ -122,52 +129,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ---------------- Existing Logic Below ----------------
 
-  void _listenForAdminUpdates() {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    _leaveSubscription = FirebaseFirestore.instance
-        .collection('leaves')
-        .where('uid', isEqualTo: user.uid)
-        .snapshots()
-        .listen((snapshot) {
-      for (var change in snapshot.docChanges) {
-        if (change.type == DocumentChangeType.modified) {
-          final data = change.doc.data();
-          final status = data?['status'];
-          final type = data?['type'] ?? 'Leave';
-
-          if (status == 'Approved' || status == 'Rejected') {
-            NotificationService().showStatusNotification(
-              'Leave Update',
-              'Your $type application has been $status.'
-            );
-          }
-        }
-      }
-    });
-
-    _profileSubscription = FirebaseFirestore.instance
-        .collection('edit_requests')
-        .where('userId', isEqualTo: user.uid)
-        .snapshots()
-        .listen((snapshot) {
-      for (var change in snapshot.docChanges) {
-        if (change.type == DocumentChangeType.modified) {
-          final data = change.doc.data();
-          final status = data?['status'];
-
-          if (status == 'approved' || status == 'rejected') {
-             String displayStatus = status == 'approved' ? 'Approved' : 'Rejected';
-             NotificationService().showStatusNotification(
-              'Profile Update Request',
-              'Your request to update profile has been $displayStatus.'
-            );
-          }
-        }
-      }
-    });
-  }
+  // 🔴 此方法已不再被调用，功能已移交 NotificationService
 
   void _checkAndResumeTracking() {
     final user = FirebaseAuth.instance.currentUser;

@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-// import 'package:cloud_firestore/cloud_firestore.dart'; // 移除未使用的引用
 import 'package:easy_localization/easy_localization.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:field_track_app/screens/login_screen.dart';
 import 'package:field_track_app/screens/change_password_screen.dart';
-// import '../services/notification_service.dart'; 
+import '../services/notification_service.dart'; // 🟢 1. 取消注释以使用 NotificationService
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -16,8 +15,6 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  // 1. 移除未使用的 _db
-  // final FirebaseFirestore _db = FirebaseFirestore.instance;
   
   // Settings State
   bool _notificationsEnabled = true;
@@ -39,7 +36,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // 加载本地设置
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    // 检查 mounted 防止在组件销毁后调用 setState
     if (!mounted) return; 
     setState(() {
       _notificationsEnabled = prefs.getBool('notifications_enabled') ?? true;
@@ -56,7 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _notificationsEnabled = value);
 
     if (!value) {
-      // NotificationService().cancelAllReminders(); 
+      NotificationService().cancelAllReminders(); 
     }
   }
 
@@ -64,7 +60,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _toggleBiometric(bool value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('biometric_enabled', value);
-    if (!mounted) return; // 2. 关键修复：异步操作后检查 mounted
+    if (!mounted) return;
     setState(() => _biometricEnabled = value);
     
     if (value) {
@@ -80,14 +76,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) return;
     setState(() {}); 
   }
-
-  // 3. 移除未使用的 _formatTimestamp 方法
-  /*
-  String _formatTimestamp(Timestamp? ts) {
-    if (ts == null) return "";
-    return DateFormat('dd MMM yyyy, hh:mm a').format(ts.toDate());
-  }
-  */
 
   @override
   Widget build(BuildContext context) {
@@ -112,10 +100,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _biometricEnabled,
             onChanged: _toggleBiometric,
             secondary: const Icon(Icons.fingerprint, color: Colors.blue),
-            // 4. 修复 activeColor 弃用警告
-            // 使用 activeTrackColor 控制轨道颜色，或 activeThumbColor 控制滑块颜色
             activeTrackColor: Colors.blue, 
-            activeThumbColor: Colors.white, // 设置滑块为白色以配合轨道
+            activeThumbColor: Colors.white, 
           ),
           
           const Divider(),
@@ -126,7 +112,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _notificationsEnabled,
             onChanged: _toggleNotifications,
             secondary: const Icon(Icons.notifications_active, color: Colors.orange),
-            // 4. 修复 activeColor 弃用警告
             activeTrackColor: Colors.orange,
             activeThumbColor: Colors.white,
           ),
@@ -159,10 +144,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leading: const Icon(Icons.logout, color: Colors.red),
             title: Text('settings.logout'.tr(), style: const TextStyle(color: Colors.red)),
             onTap: () async {
+              // 🟢 2. 停止监听器 (防止内存泄漏和后台报错)
+              NotificationService().stopListening();
+              
+              // 执行登出
               await _auth.signOut();
               
-              // ✅ 修复：使用 context.mounted 代替 !mounted
-              // 这明确告诉编译器我们是在检查 context 是否有效
               if (!context.mounted) return;
               
               Navigator.of(context).pushAndRemoveUntil(
