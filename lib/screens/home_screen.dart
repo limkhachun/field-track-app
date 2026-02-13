@@ -27,13 +27,11 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Removed WidgetsBindingObserver (BiometricGuard now handles lock screen)
-
   String _staffName = "Staff";
   String? _faceIdPhotoPath;
 
-  StreamSubscription? _leaveSubscription;
-  StreamSubscription? _profileSubscription;
+  // 🟢 专门用于管理公告的弹窗监听
+  StreamSubscription? _announcementSubscription;
 
   @override
   void initState() {
@@ -42,20 +40,19 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadUserData();
 
     // 2. Start Notification Listeners
-    // 🟢 NEW: Activate Global Notification Listener Service
+    // 🟢 激活全局通知服务 (后台状态栏通知)
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
-      // 启动监听 Leave, Correction, Profile, Payslip 的变化
       NotificationService().startListeningToUserUpdates(user.uid);
     }
     
-    // _listenForAdminUpdates(); // 🔴 已注释：防止与 NotificationService 重复导致双重弹窗
+    // 3. 🟢 启动 App 内公告弹窗监听 (前台强提醒)
+    _listenForAnnouncements(); 
 
-    // 3. 🟢 New: Check if biometric setup is needed
-    // (Delayed slightly to avoid conflict with initial rendering)
+    // 4. Check Biometric
     Future.delayed(const Duration(seconds: 1), _checkBiometricSetup);
 
-    // 4. Resume GPS Tracking
+    // 5. Resume GPS Tracking
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkAndResumeTracking();
     });
@@ -63,39 +60,91 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    _leaveSubscription?.cancel();
-    _profileSubscription?.cancel();
+    // 记得销毁监听器
+    _announcementSubscription?.cancel();
     super.dispose();
+  }
+
+  // 🟢 核心功能：监听最新公告并弹出对话框
+  void _listenForAnnouncements() {
+    _announcementSubscription = FirebaseFirestore.instance
+        .collection('announcements')
+        .orderBy('createdAt', descending: true)
+        .limit(1)
+        .snapshots()
+        .listen((snapshot) async {
+      if (snapshot.docs.isEmpty) return;
+
+      final data = snapshot.docs.first.data();
+      final String message = data['message'] ?? '';
+      final Timestamp? createdAt = data['createdAt'];
+      
+      if (createdAt == null || message.isEmpty) return;
+
+      final prefs = await SharedPreferences.getInstance();
+      // 获取上次已读公告的时间戳
+      final lastShownTime = prefs.getInt('last_announcement_time') ?? 0;
+      
+      // 只有当公告的时间晚于上次已读时间时，才弹窗
+      if (createdAt.millisecondsSinceEpoch > lastShownTime) {
+        
+        // 立即更新本地记录，防止下次打开重复弹窗
+        await prefs.setInt('last_announcement_time', createdAt.millisecondsSinceEpoch);
+        
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+              title: Row(
+                children: [
+                  const Icon(Icons.campaign, color: Colors.orange),
+                  const SizedBox(width: 10),
+                  Text('announcement.title'.tr()), // 确保你的语言包有这个key，或者写死 "Announcement"
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Text(
+                  message, 
+                  style: const TextStyle(fontSize: 15),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text("OK"),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    });
   }
 
   // 🟢 Core Logic: Ask to enable biometrics on first login
   Future<void> _checkBiometricSetup() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // Check flags
-    bool hasAsked = prefs.getBool('has_asked_biometrics') ?? false; // Has asked before?
-    bool isEnabled = prefs.getBool('biometric_enabled') ?? false;   // Is already enabled?
+    bool hasAsked = prefs.getBool('has_asked_biometrics') ?? false; 
+    bool isEnabled = prefs.getBool('biometric_enabled') ?? false;   
 
-    // If enabled or already asked (and rejected), do not disturb
     if (hasAsked || isEnabled) return;
 
-    // Check hardware support
     bool isHardwareSupported = await BiometricService().isDeviceSupported();
-    if (!isHardwareSupported) return; // Skip if device not supported
+    if (!isHardwareSupported) return; 
 
     if (!mounted) return;
 
-    // Show dialog
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         title: Text('settings.biometric_lock'.tr()),
-        content: Text('login.ask_biometric_desc'.tr()), // "Use Fingerprint/Face ID for faster login..."
+        content: Text('login.ask_biometric_desc'.tr()), 
         actions: [
           TextButton(
             onPressed: () async {
-              // User chose "Later" -> Mark as asked
               await prefs.setBool('has_asked_biometrics', true);
               if (ctx.mounted) Navigator.pop(ctx);
             },
@@ -103,13 +152,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
-              Navigator.pop(ctx); // Close dialog, start auth
-
-              // Verify identity immediately
+              Navigator.pop(ctx); 
               bool success = await BiometricService().authenticateStaff();
 
               if (success) {
-                // Verification success -> Enable feature and save
                 await prefs.setBool('biometric_enabled', true);
                 await prefs.setBool('has_asked_biometrics', true);
 
@@ -126,10 +172,6 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-
-  // ---------------- Existing Logic Below ----------------
-
-  // 🔴 此方法已不再被调用，功能已移交 NotificationService
 
   void _checkAndResumeTracking() {
     final user = FirebaseAuth.instance.currentUser;
@@ -161,7 +203,6 @@ class _HomeScreenState extends State<HomeScreen> {
               } else if (personal['name'] != null) {
                 _staffName = personal['name'];
               }
-              // 🟢 Cache Name (For Biometric Guard Lock Screen)
               _cacheUserName(_staffName);
             }
 
@@ -176,7 +217,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Helper: Cache User Name
   Future<void> _cacheUserName(String name) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('cached_staff_name', name);

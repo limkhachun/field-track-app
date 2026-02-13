@@ -6,32 +6,26 @@ import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // 🟢 新增：用于检查设置开关
 
 class NotificationService {
-  // Singleton Pattern
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
 
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
 
-  // Notification IDs
   static const int _trackingId = 888;
   static const int _shiftStartId = 101;
   static const int _shiftEndId = 102;
 
-  // Channel IDs
   static const String _trackingChannelId = 'tracking_channel';
   static const String _reminderChannelId = 'shift_reminders';
   static const String _statusChannelId = 'status_updates'; 
 
   bool _isInitialized = false;
-  
-  // 🟢 Listener Subscription List (to cancel on logout)
   final List<StreamSubscription> _subscriptions = [];
-  DateTime? _listeningStartTime;
 
-  /// Initialize the Notification Service
   Future<void> init() async {
     if (_isInitialized) return;
 
@@ -55,6 +49,13 @@ class NotificationService {
       );
 
       await _notificationsPlugin.initialize(settings);
+      
+      // 🟢 新增：请求 Android 13+ 的通知权限
+      final AndroidFlutterLocalNotificationsPlugin? androidImplementation =
+          _notificationsPlugin.resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      await androidImplementation?.requestNotificationsPermission();
+
       _isInitialized = true;
       debugPrint("✅ NotificationService initialized");
     } catch (e) {
@@ -62,152 +63,102 @@ class NotificationService {
     }
   }
 
-  // =========================================================
-  // 🎧 🟢 CORE FUNCTION: Listen to Firestore Updates
-  // =========================================================
+  // 🟢 新增：检查用户是否在设置中开启了通知
+  Future<bool> _canShowNotification() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool('notifications_enabled') ?? true;
+  }
 
-  /// Call this method after user login
   void startListeningToUserUpdates(String uid) {
-    stopListening(); // Prevent duplicate listeners
-    _listeningStartTime = DateTime.now(); // Only notify for changes AFTER this time
+    stopListening(); 
     debugPrint("🎧 Started listening for Admin updates for UID: $uid");
 
     // 1. Listen for Leave Approvals
+    bool isLeaveInitial = true; // 🟢 使用布尔值跳过首次加载，抛弃时间戳对比
     _subscriptions.add(
-      FirebaseFirestore.instance
-          .collection('leaves')
-          .where('authUid', isEqualTo: uid) 
-          .snapshots()
-          .listen((snapshot) {
+      FirebaseFirestore.instance.collection('leaves').where('authUid', isEqualTo: uid).snapshots().listen((snapshot) {
+        if (isLeaveInitial) { isLeaveInitial = false; return; } // 跳过旧数据
         for (var change in snapshot.docChanges) {
-          // Only care about Modified docs (Admin updates status)
           if (change.type == DocumentChangeType.modified) {
-            final data = change.doc.data() as Map<String, dynamic>;
-            _checkAndNotify(
-              data: data,
-              title: 'Leave Update',
-              body: 'Your ${data['type']} request has been ${data['status']}.',
-              timeField: 'reviewedAt', // Field updated by Admin
-            );
+            final data = change.doc.data() ?? {};
+            _triggerNotification('Leave Update', 'Your ${data['type']} request has been ${data['status']}.');
           }
         }
       })
     );
 
     // 2. Listen for Attendance Correction Replies
+    bool isCorrectionInitial = true;
     _subscriptions.add(
-      FirebaseFirestore.instance
-          .collection('attendance_corrections')
-          .where('authUid', isEqualTo: uid)
-          .snapshots()
-          .listen((snapshot) {
+      FirebaseFirestore.instance.collection('attendance_corrections').where('authUid', isEqualTo: uid).snapshots().listen((snapshot) {
+        if (isCorrectionInitial) { isCorrectionInitial = false; return; }
         for (var change in snapshot.docChanges) {
           if (change.type == DocumentChangeType.modified) {
-            final data = change.doc.data() as Map<String, dynamic>;
-            _checkAndNotify(
-              data: data,
-              title: 'Attendance Correction',
-              body: 'Your correction request for ${data['targetDate']} was ${data['status']}.',
-              timeField: 'resolvedAt', 
-            );
+            final data = change.doc.data() ?? {};
+            _triggerNotification('Attendance Correction', 'Your correction request for ${data['targetDate']} was ${data['status']}.');
           }
         }
       })
     );
 
     // 3. Listen for Profile Update Requests
+    bool isProfileInitial = true;
     _subscriptions.add(
-      FirebaseFirestore.instance
-          .collection('edit_requests')
-          .where('uid', isEqualTo: uid)
-          .snapshots()
-          .listen((snapshot) {
+      FirebaseFirestore.instance.collection('edit_requests').where('uid', isEqualTo: uid).snapshots().listen((snapshot) {
+        if (isProfileInitial) { isProfileInitial = false; return; }
         for (var change in snapshot.docChanges) {
           if (change.type == DocumentChangeType.modified) {
-            final data = change.doc.data() as Map<String, dynamic>;
-            _checkAndNotify(
-              data: data,
-              title: 'Profile Update',
-              body: 'Your profile update request has been ${data['status']}.',
-              timeField: 'reviewedAt',
-            );
+            final data = change.doc.data() ?? {};
+            _triggerNotification('Profile Update', 'Your profile update request has been ${data['status']}.');
           }
         }
       })
     );
 
     // 4. Listen for New Payslips
+    bool isPayslipInitial = true;
     _subscriptions.add(
-      FirebaseFirestore.instance
-          .collection('payslips')
-          .where('uid', isEqualTo: uid) // Ensure this matches your payslip logic (authUid vs empId)
-          .where('status', isEqualTo: 'Published')
-          .snapshots()
-          .listen((snapshot) {
+      FirebaseFirestore.instance.collection('payslips').where('uid', isEqualTo: uid).where('status', isEqualTo: 'Published').snapshots().listen((snapshot) {
+        if (isPayslipInitial) { isPayslipInitial = false; return; }
         for (var change in snapshot.docChanges) {
-          // Payslips are either Added or Modified to 'Published'
           if (change.type == DocumentChangeType.added || change.type == DocumentChangeType.modified) {
-            final data = change.doc.data() as Map<String, dynamic>;
-            _checkAndNotify(
-              data: data,
-              title: 'Payslip Ready',
-              body: 'Your payslip for ${data['month']} is now available.',
-              timeField: 'updatedAt', // Ensure you save this timestamp when publishing
-            );
+            final data = change.doc.data() ?? {};
+            _triggerNotification('Payslip Ready', 'Your payslip for ${data['month']} is now available.');
           }
         }
       })
     );
     
-    // 5. 🟢 Listen for Announcements
+    // 5. Listen for Announcements
+    bool isAnnounceInitial = true;
     _subscriptions.add(
-      FirebaseFirestore.instance
-          .collection('announcements')
-          .orderBy('createdAt', descending: true)
-          .limit(1)
-          .snapshots()
-          .listen((snapshot) {
-        if (snapshot.docs.isNotEmpty) {
-          final doc = snapshot.docs.first;
-          // Check if this is a new announcement (created after login)
-          // or you can implement a 'read' status logic if needed
-          if (doc.metadata.hasPendingWrites == false) { // Skip local writes if any
-             final data = doc.data();
-             _checkAndNotify(
-              data: data,
-              title: '📢 New Announcement',
-              body: data['message'] ?? 'Check the app for a new update.',
-              timeField: 'createdAt',
-            );
+      FirebaseFirestore.instance.collection('announcements').orderBy('createdAt', descending: true).limit(1).snapshots().listen((snapshot) {
+        if (isAnnounceInitial) { isAnnounceInitial = false; return; }
+        for (var change in snapshot.docChanges) {
+          if (change.type == DocumentChangeType.added) { // 只有新增公告才弹窗
+             final data = change.doc.data() ?? {};
+             _triggerNotification('📢 New Announcement', data['message'] ?? 'Check the app for a new update.');
           }
         }
       })
     );
   }
 
-  /// Internal Helper: Check timestamp before showing notification
-  void _checkAndNotify({
-    required Map<String, dynamic> data,
-    required String title,
-    required String body,
-    required String timeField,
-  }) {
-    if (_listeningStartTime == null) return;
-
-    Timestamp? ts = data[timeField] as Timestamp?;
-    // Only notify if the action happened AFTER we started listening (i.e., just now)
-    if (ts != null && ts.toDate().isAfter(_listeningStartTime!)) {
-       showStatusNotification(title, body);
+  // 🟢 统一的触发器入口
+  Future<void> _triggerNotification(String title, String body) async {
+    // 发送前检查设置面板的开关
+    if (!await _canShowNotification()) {
+      debugPrint("🔕 Notification blocked by user settings.");
+      return;
     }
+    showStatusNotification(title, body);
   }
 
-  /// Call this on Logout
   void stopListening() {
     for (var sub in _subscriptions) {
       sub.cancel();
     }
     _subscriptions.clear();
-    _listeningStartTime = null;
     debugPrint("🛑 Stopped listening for updates");
   }
 
@@ -216,6 +167,8 @@ class NotificationService {
   // =========================================================
 
   Future<void> showTrackingNotification() async {
+    if (!await _canShowNotification()) return;
+
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       _trackingChannelId,
       'GPS Tracking Service',
@@ -258,7 +211,6 @@ class NotificationService {
 
     const NotificationDetails details = NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails());
     
-    // Use current time as ID to allow multiple notifications stacking
     int notificationId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
     await _notificationsPlugin.show(
@@ -274,9 +226,10 @@ class NotificationService {
   // =========================================================
 
   Future<void> scheduleShiftReminders(DateTime shiftStart, DateTime shiftEnd) async {
+    if (!await _canShowNotification()) return;
+    
     final now = DateTime.now();
 
-    // A. Shift Start Reminder (15 mins before)
     final scheduledStart = shiftStart.subtract(const Duration(minutes: 15));
     if (scheduledStart.isAfter(now)) {
       await _scheduleNotification(
@@ -287,7 +240,6 @@ class NotificationService {
       );
     }
 
-    // B. Shift End Reminder (10 mins before)
     final scheduledEnd = shiftEnd.subtract(const Duration(minutes: 10));
     if (scheduledEnd.isAfter(now)) {
       await _scheduleNotification(

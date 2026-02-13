@@ -49,7 +49,7 @@ class TrackingService {
     }
   }
 
-  /// ▶️ 开始追踪
+  /// ▶️ 开始追踪 (🟢 已添加 Driver 权限检查)
   Future<void> startTracking(String userId) async {
     if (isTrackingNotifier.value) return; 
 
@@ -59,6 +59,34 @@ class TrackingService {
     }
 
     if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+      
+      // 🟢 1. 检查是否为 Driver
+      try {
+        final userQuery = await FirebaseFirestore.instance
+            .collection('users')
+            .where('authUid', isEqualTo: userId)
+            .limit(1)
+            .get();
+
+        if (userQuery.docs.isNotEmpty) {
+          final userData = userQuery.docs.first.data();
+          // 如果 isDriver 字段不存在或为 false，则禁止追踪
+          bool isDriver = userData['isDriver'] == true;
+
+          if (!isDriver) {
+            debugPrint("🚫 User is not setup as a Driver. Tracking skipped.");
+            return; // 直接返回，不启动流
+          }
+        } else {
+          debugPrint("⚠️ User profile not found. Tracking skipped.");
+          return;
+        }
+      } catch (e) {
+        debugPrint("Error checking driver status: $e");
+        return; // 出错时安全退出
+      }
+
+      // 🟢 2. 验证通过，初始化追踪
       _currentUserId = userId;
       _lastUploadedPosition = null; 
       
@@ -81,7 +109,7 @@ class TrackingService {
 
       isTrackingNotifier.value = true;
       _scheduleAutoStop(userId); 
-      debugPrint("✅ Tracking Started");
+      debugPrint("✅ Tracking Started (Driver Verified)");
     } else {
       debugPrint("❌ Location permission denied");
     }
