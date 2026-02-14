@@ -872,7 +872,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
 }
 
 // ==========================================
-//  Tab 2: History (No Changes)
+//  Tab 2: History (With Archive Support)
 // ==========================================
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key});
@@ -891,6 +891,7 @@ class _HistoryTabState extends State<HistoryTab> {
 
     return Column(
       children: [
+        // Header
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 20, 16, 10),
           child: Row(
@@ -929,6 +930,8 @@ class _HistoryTabState extends State<HistoryTab> {
           ),
         ),
         const Divider(height: 1),
+        
+        // List
         Expanded(
           child: StreamBuilder<QuerySnapshot>(
             stream: FirebaseFirestore.instance
@@ -952,11 +955,20 @@ class _HistoryTabState extends State<HistoryTab> {
                 itemBuilder: (context, index) {
                   final data = docs[index].data() as Map<String, dynamic>;
                   final ts = (data['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
-                  bool isVerified = data['verificationStatus'] == 'Verified';
+                  
+                  // 🟢 1. 获取状态
+                  String status = data['verificationStatus'] ?? 'Pending';
+                  bool isVerified = status == 'Verified' || status == 'Corrected';
+                  bool isArchived = status == 'Archived'; // 🟢 识别旧记录
+
+                  // 🟢 2. 定义样式 (如果是旧记录，变灰且有删除线)
+                  Color textColor = isArchived ? Colors.grey : Colors.black87;
+                  TextDecoration textDecor = isArchived ? TextDecoration.lineThrough : TextDecoration.none;
                   
                   return Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
+                      color: isArchived ? Colors.grey.shade100 : Colors.white, // 背景变灰
                       border: Border.all(color: Colors.grey.shade300),
                       borderRadius: BorderRadius.circular(8),
                     ),
@@ -969,31 +981,53 @@ class _HistoryTabState extends State<HistoryTab> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(DateFormat('dd-MM-yyyy').format(ts),
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.black54)),
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold, 
+                                      fontSize: 13, 
+                                      color: textColor, // 使用定义好的颜色
+                                      decoration: textDecor
+                                  )),
                               Text(DateFormat('HH:mm:ss').format(ts), 
                                   style: TextStyle(
                                       fontWeight: FontWeight.bold,
                                       fontSize: 14,
-                                      color: isVerified ? Colors.black87 : Colors.orange)), 
+                                      color: isArchived ? Colors.grey : (isVerified ? Colors.black87 : Colors.orange),
+                                      decoration: textDecor
+                                  )), 
                             ],
                           ),
                         ),
                         Expanded(
                           flex: 4,
-                          child: Text(
-                            data['address'] ?? "Unknown",
-                            style: const TextStyle(fontSize: 12, color: Color(0xFF15438c)),
-                            maxLines: 5,
-                            overflow: TextOverflow.ellipsis,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                data['address'] ?? "Unknown",
+                                style: TextStyle(
+                                  fontSize: 12, 
+                                  color: isArchived ? Colors.grey : const Color(0xFF15438c),
+                                  decoration: textDecor
+                                ),
+                                maxLines: 5,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              // 🟢 3. 如果是 Admin 修改产生的新记录，显示标记
+                              if (data['address'] == "Admin Manual Edit")
+                                Container(
+                                  margin: const EdgeInsets.only(top: 4),
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(4)),
+                                  child: const Text("Admin Edited", style: TextStyle(fontSize: 10, color: Colors.blue, fontWeight: FontWeight.bold))
+                                )
+                            ],
                           ),
                         ),
                         Expanded(
                           flex: 2,
                           child: Align(
                             alignment: Alignment.centerRight,
-                            child: isVerified 
-                              ? const Icon(Icons.check_circle, color: Colors.green, size: 18)
-                              : const Icon(Icons.access_time, color: Colors.orange, size: 18)
+                            child: _buildStatusIcon(status), // 🟢 4. 调用辅助方法
                           ),
                         ),
                       ],
@@ -1007,8 +1041,27 @@ class _HistoryTabState extends State<HistoryTab> {
       ],
     );
   }
-}
 
+  // 🟢 修复：确保这个方法在 _HistoryTabState 类内部
+  Widget _buildStatusIcon(String status) {
+    if (status == 'Archived') {
+      return const Column(
+        mainAxisSize: MainAxisSize.min,
+        children:  [
+          Icon(Icons.history, color: Colors.grey, size: 18),
+          Text("Old", style: TextStyle(fontSize: 10, color: Colors.grey))
+        ],
+      );
+    } else if (status == 'Verified' || status == 'Corrected') {
+      return const Icon(Icons.check_circle, color: Colors.green, size: 18);
+    } else if (status == 'Rejected') {
+      return const Icon(Icons.cancel, color: Colors.red, size: 18);
+    } else {
+      // Pending
+      return const Icon(Icons.access_time, color: Colors.orange, size: 18);
+    }
+  }
+}
 // ==========================================
 //  Tab 3: Schedule Tab (MODIFIED)
 // ==========================================
