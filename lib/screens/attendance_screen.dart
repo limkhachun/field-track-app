@@ -872,7 +872,7 @@ class _AttendanceActionTabState extends State<AttendanceActionTab> {
 }
 
 // ==========================================
-//  Tab 2: History (With Archive Support)
+//  Tab 2: History (Staff Uploads Only)
 // ==========================================
 class HistoryTab extends StatefulWidget {
   const HistoryTab({super.key});
@@ -943,7 +943,18 @@ class _HistoryTabState extends State<HistoryTab> {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(child: CircularProgressIndicator());
               }
-              final docs = snapshot.data?.docs ?? [];
+              
+              final allDocs = snapshot.data?.docs ?? [];
+              
+              // 🟢 核心过滤：只保留员工自己上传的记录
+              // 过滤掉所有由 Admin 创建的 "Admin Manual Edit" 或 "Admin Manual Entry"
+              final docs = allDocs.where((d) {
+                final data = d.data() as Map<String, dynamic>;
+                final address = data['address']?.toString() ?? '';
+                // 如果地址包含 "Admin Manual"，说明是后台操作的，隐藏掉
+                return !address.contains("Admin Manual");
+              }).toList();
+
               if (docs.isEmpty) {
                 return Center(child: Text("att.no_history".tr(), style: const TextStyle(color: Colors.grey)));
               }
@@ -956,78 +967,61 @@ class _HistoryTabState extends State<HistoryTab> {
                   final data = docs[index].data() as Map<String, dynamic>;
                   final ts = (data['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now();
                   
-                  // 🟢 1. 获取状态
+                  // 获取状态，但不做特殊视觉处理，仅仅用于显示图标
                   String status = data['verificationStatus'] ?? 'Pending';
-                  bool isVerified = status == 'Verified' || status == 'Corrected';
-                  bool isArchived = status == 'Archived'; // 🟢 识别旧记录
-
-                  // 🟢 2. 定义样式 (如果是旧记录，变灰且有删除线)
-                  Color textColor = isArchived ? Colors.grey : Colors.black87;
-                  TextDecoration textDecor = isArchived ? TextDecoration.lineThrough : TextDecoration.none;
                   
                   return Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: isArchived ? Colors.grey.shade100 : Colors.white, // 背景变灰
+                      color: Colors.white, // 统一白色背景
                       border: Border.all(color: Colors.grey.shade300),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // A. Time Column
                         Expanded(
                           flex: 3,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(DateFormat('dd-MM-yyyy').format(ts),
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                       fontWeight: FontWeight.bold, 
                                       fontSize: 13, 
-                                      color: textColor, // 使用定义好的颜色
-                                      decoration: textDecor
+                                      color: Colors.black54, // 统一颜色
                                   )),
                               Text(DateFormat('HH:mm:ss').format(ts), 
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                       fontWeight: FontWeight.bold,
                                       fontSize: 14,
-                                      color: isArchived ? Colors.grey : (isVerified ? Colors.black87 : Colors.orange),
-                                      decoration: textDecor
+                                      color: Colors.black87, // 统一颜色
                                   )), 
                             ],
                           ),
                         ),
+                        
+                        // B. Address Column
                         Expanded(
                           flex: 4,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                data['address'] ?? "Unknown",
-                                style: TextStyle(
-                                  fontSize: 12, 
-                                  color: isArchived ? Colors.grey : const Color(0xFF15438c),
-                                  decoration: textDecor
-                                ),
-                                maxLines: 5,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              // 🟢 3. 如果是 Admin 修改产生的新记录，显示标记
-                              if (data['address'] == "Admin Manual Edit")
-                                Container(
-                                  margin: const EdgeInsets.only(top: 4),
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(4)),
-                                  child: const Text("Admin Edited", style: TextStyle(fontSize: 10, color: Colors.blue, fontWeight: FontWeight.bold))
-                                )
-                            ],
+                          child: Text(
+                            data['address'] ?? "Unknown",
+                            style: const TextStyle(
+                              fontSize: 12, 
+                              color: Color(0xFF15438c),
+                            ),
+                            maxLines: 5,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
+                        
+                        // C. Status Icon Column
                         Expanded(
                           flex: 2,
                           child: Align(
                             alignment: Alignment.centerRight,
-                            child: _buildStatusIcon(status), // 🟢 4. 调用辅助方法
+                            child: _buildStatusIcon(status),
                           ),
                         ),
                       ],
@@ -1042,23 +1036,17 @@ class _HistoryTabState extends State<HistoryTab> {
     );
   }
 
-  // 🟢 修复：确保这个方法在 _HistoryTabState 类内部
+  // 🟢 简化的状态图标：只显示 Pending 或 Verified 两种状态的感觉
+  // 即使后台状态是 Archived，在这里也当作 "已记录" 显示，不让员工产生困惑
   Widget _buildStatusIcon(String status) {
-    if (status == 'Archived') {
-      return const Column(
-        mainAxisSize: MainAxisSize.min,
-        children:  [
-          Icon(Icons.history, color: Colors.grey, size: 18),
-          Text("Old", style: TextStyle(fontSize: 10, color: Colors.grey))
-        ],
-      );
-    } else if (status == 'Verified' || status == 'Corrected') {
-      return const Icon(Icons.check_circle, color: Colors.green, size: 18);
+    if (status == 'Verified' || status == 'Corrected' || status == 'Approved') {
+      return const Icon(Icons.check_circle, color: Colors.green, size: 20);
     } else if (status == 'Rejected') {
-      return const Icon(Icons.cancel, color: Colors.red, size: 18);
+      return const Icon(Icons.cancel, color: Colors.red, size: 20);
     } else {
-      // Pending
-      return const Icon(Icons.access_time, color: Colors.orange, size: 18);
+      // 包括 Pending 和 Archived (因为是员工视角的原始记录)
+      // 统一显示为一个代表 "已记录/待定" 的图标
+      return const Icon(Icons.task_alt, color: Colors.black54, size: 20); 
     }
   }
 }
