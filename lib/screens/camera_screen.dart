@@ -119,7 +119,6 @@ class _CameraScreenState extends State<CameraScreen> {
     if (mounted) setState(() => _dateTimeStr = DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now()));
   }
 
-  // 智能估算文字宽度
   int _estimateTextWidth(String text) {
     int width = 0;
     for (int i = 0; i < text.length; i++) {
@@ -135,7 +134,6 @@ class _CameraScreenState extends State<CameraScreen> {
     return width;
   }
 
-  // 文字换行
   List<String> _wrapText(String text, int maxChars) {
     List<String> lines = [];
     List<String> words = text.split(' ');
@@ -152,10 +150,9 @@ class _CameraScreenState extends State<CameraScreen> {
     return lines;
   }
 
-  // 绘制描边文字
   void _drawOutlinedText(img.Image image, String text, int x, int y, img.BitmapFont font, {bool isYellow = false}) {
     final black = img.ColorRgba8(0, 0, 0, 255);
-    const int offset = 3; // 描边粗细
+    const int offset = 3; 
 
     final offsets = [
       [-offset, -offset], [0, -offset], [offset, -offset],
@@ -170,24 +167,19 @@ class _CameraScreenState extends State<CameraScreen> {
     img.drawString(image, text, font: font, x: x, y: y, color: mainColor);
   }
 
-  // 核心：处理图片
   Future<File> _processImageWithWatermark(String inputPath) async {
     final Uint8List bytes = await File(inputPath).readAsBytes();
     img.Image? baseImage = img.decodeImage(bytes);
     if (baseImage == null) return File(inputPath);
 
-    // 1. 缩放至 1080px (保证字体比例协调)
     const int targetWidth = 1080;
     if (baseImage.width != targetWidth) {
       baseImage = img.copyResize(baseImage, width: targetWidth, interpolation: img.Interpolation.linear);
     }
 
-    // 2. 使用 arial48 字体
     img.BitmapFont font = img.arial48; 
 
-    // 3. 布局参数
     const int marginRight = 40; 
-    // 🟢 关键调整：底部边距调大到 250px (相当于上移约 3-4 行的高度)
     const int marginBottom = 250; 
     const int wrapChars = 38; 
 
@@ -197,10 +189,8 @@ class _CameraScreenState extends State<CameraScreen> {
     int lineHeight = (font.lineHeight * 1.3).toInt(); 
     int contentHeight = allLines.length * lineHeight;
 
-    // 起始 Y 坐标 (图片高度 - 内容高度 - 底部大边距)
     int yStart = baseImage.height - contentHeight - marginBottom;
     
-    // 4. 逐行绘制
     for (int i = 0; i < allLines.length; i++) {
       String line = allLines[i];
       int textWidth = _estimateTextWidth(line);
@@ -236,20 +226,19 @@ class _CameraScreenState extends State<CameraScreen> {
       File watermarkedFile = await _processImageWithWatermark(rawImage.path);
       String fileName = watermarkedFile.path.split('/').last;
 
-      // 3. 保存相册
+      // 3. 保存相册 (静默)
       try {
         await Gal.putImage(watermarkedFile.path, album: "FieldTrack");
-        debugPrint("✅ Saved to Gallery");
       } catch (e) {
-        debugPrint("⚠️ Gallery Save Error: $e");
+        // Silent catch
       }
 
-      // 4. 上传 Firebase
+      // 4. 上传 Firebase (静默)
       Reference storageRef = FirebaseStorage.instance.ref().child('accident_evidence').child(fileName);
       await storageRef.putFile(watermarkedFile);
       String downloadUrl = await storageRef.getDownloadURL();
 
-      // 5. 记录 Firestore
+      // 5. 记录 Firestore (静默)
       await FirebaseFirestore.instance.collection('evidence_logs').add({
         'uid': user.uid,
         'staffName': _staffName,
@@ -261,13 +250,11 @@ class _CameraScreenState extends State<CameraScreen> {
         'type': 'accident_evidence'
       });
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✅ Saved & Uploaded!"), backgroundColor: Colors.green));
-      }
+      // 不显示任何成功提示，直接结束
 
     } catch (e) {
-      debugPrint("Error: $e");
       if (mounted) {
+        // 只在出错时保留提示，避免用户不知道拍照失败
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
       }
     } finally {
@@ -275,7 +262,6 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  // UI 预览样式 (黑边白字)
   TextStyle _getOutlinedTextStyle({required double fontSize, FontWeight fontWeight = FontWeight.bold, Color color = Colors.white}) {
     return TextStyle(
       fontSize: fontSize,
