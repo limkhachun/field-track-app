@@ -37,7 +37,7 @@ Future<Map<String, double>?> getOfficeLocation() async {
     // FIX: Using LocationSettings instead of deprecated desiredAccuracy
     const LocationSettings locationSettings = LocationSettings(
       accuracy: LocationAccuracy.high,
-      distanceFilter: 10,
+      distanceFilter: 100,
     );
 
     return await Geolocator.getCurrentPosition(

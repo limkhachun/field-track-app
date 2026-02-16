@@ -4,7 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:easy_localization/easy_localization.dart';
 // 📦 Import Biometric Guard (Create this file first as discussed)
 import 'widgets/biometric_guard.dart'; 
-
+import 'services/background_service.dart';
 import 'firebase_options.dart';
 import 'screens/login_screen.dart'; 
 import 'screens/home_screen.dart';
@@ -20,7 +20,7 @@ void main() async {
 
   // 2. Initialize Notification Service
   await NotificationService().init();
-  
+  await BackgroundService.initialize();
   // 3. Initialize Localization
   await EasyLocalization.ensureInitialized();
 

@@ -24,7 +24,7 @@ dependencies:
   timezone: ^0.9.4
   shared_preferences: ^2.3.5
   flutter_timezone: ^3.0.1
-  
+  flutter_background_service: ^5.0.0
   # Location and Maps
   geolocator: ^13.0.2
   geocoding: ^3.0.0
