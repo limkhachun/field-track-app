@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
-import 'package:shared_preferences/shared_preferences.dart'; 
-import '../services/biometric_service.dart'; 
-import '../screens/home_screen.dart'; 
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/biometric_service.dart';
+import '../screens/home_screen.dart';
 import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -25,10 +25,21 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool _isObscured = true;
   bool _isLoading = false;
-  
-  // 🟢 Rate Limiting Variables
+
+  // 🟢 Rate Limiting Variables (State)
   int _failedAttempts = 0;
   DateTime? _lockoutTime;
+
+  // 🟢 Constants for SharedPreferences keys
+  static const String _keyFailedAttempts = 'auth_failed_attempts';
+  static const String _keyLockoutTime = 'auth_lockout_timestamp';
+
+  @override
+  void initState() {
+    super.initState();
+    // 🟢 1. App 启动时立即加载本地的安全状态
+    _loadSecurityState();
+  }
 
   @override
   void dispose() {
@@ -36,6 +47,68 @@ class _LoginScreenState extends State<LoginScreen> {
     _passController.dispose();
     _honeyPotController.dispose();
     super.dispose();
+  }
+
+  // 🟢 2. 新增：加载本地存储的安全状态
+  Future<void> _loadSecurityState() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // 读取锁定时间戳
+    final int? lockoutTimestamp = prefs.getInt(_keyLockoutTime);
+    // 读取失败次数
+    final int savedAttempts = prefs.getInt(_keyFailedAttempts) ?? 0;
+
+    if (lockoutTimestamp != null) {
+      final lockoutEnd = DateTime.fromMillisecondsSinceEpoch(lockoutTimestamp);
+      
+      if (DateTime.now().isBefore(lockoutEnd)) {
+        // 如果锁定时间还没过，恢复锁定状态
+        setState(() {
+          _lockoutTime = lockoutEnd;
+          _failedAttempts = savedAttempts;
+        });
+      } else {
+        // 如果锁定时间已过，重置状态
+        await _resetSecurityState();
+      }
+    } else {
+      // 没有锁定，但可能有失败记录
+      setState(() {
+        _failedAttempts = savedAttempts;
+      });
+    }
+  }
+
+  // 🟢 3. 新增：登录成功，清除所有限制
+  Future<void> _resetSecurityState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keyFailedAttempts);
+    await prefs.remove(_keyLockoutTime);
+    setState(() {
+      _failedAttempts = 0;
+      _lockoutTime = null;
+    });
+  }
+
+  // 🟢 4. 新增：记录失败并判断是否锁定
+  Future<void> _recordLoginFailure() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    setState(() {
+      _failedAttempts++;
+    });
+
+    await prefs.setInt(_keyFailedAttempts, _failedAttempts);
+
+    // 如果达到阈值 (5次)
+    if (_failedAttempts >= 5) {
+      final lockoutEnd = DateTime.now().add(const Duration(minutes: 5));
+      setState(() {
+        _lockoutTime = lockoutEnd;
+      });
+      // 存储锁定结束的时间戳 (毫秒)
+      await prefs.setInt(_keyLockoutTime, lockoutEnd.millisecondsSinceEpoch);
+    }
   }
 
   String _normalizePhone(String input) {
@@ -119,6 +192,8 @@ class _LoginScreenState extends State<LoginScreen> {
   void _handleLogin() async {
     // 1. Honeypot & Rate Limit Check
     if (_honeyPotController.text.isNotEmpty) return;
+    
+    // 🟢 检查是否处于锁定状态
     if (_lockoutTime != null) {
       if (DateTime.now().isBefore(_lockoutTime!)) {
         final remaining = _lockoutTime!.difference(DateTime.now()).inMinutes;
@@ -130,10 +205,8 @@ class _LoginScreenState extends State<LoginScreen> {
         );
         return;
       } else {
-        setState(() {
-          _lockoutTime = null;
-          _failedAttempts = 0;
-        });
+        // 超时解锁，重置本地状态
+        await _resetSecurityState();
       }
     }
 
@@ -167,8 +240,8 @@ class _LoginScreenState extends State<LoginScreen> {
         password: password
       );
       
-      // ✅ Success: Reset counter
-      _failedAttempts = 0;
+      // ✅ Success: Reset counter in local storage
+      await _resetSecurityState();
       
       if (userCred.user != null) {
         QuerySnapshot statusQuery = await _db
@@ -189,13 +262,8 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
     } on FirebaseAuthException catch (e) {
-      // 🟢 Fix: Use _failedAttempts to trigger lockout
-      _failedAttempts++;
-      if (_failedAttempts >= 5) {
-        setState(() {
-          _lockoutTime = DateTime.now().add(const Duration(minutes: 5));
-        });
-      }
+      // 🟢 Fix: Record failure to local storage
+      await _recordLoginFailure();
 
       String message = "Login Failed";
       if (e.code == 'user-disabled') {
@@ -214,6 +282,12 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 计算剩余锁定时间（分钟），用于显示在按钮上
+    int lockedMinutes = 0;
+    if (_lockoutTime != null) {
+      lockedMinutes = _lockoutTime!.difference(DateTime.now()).inMinutes + 1;
+    }
+
     return Scaffold(
       appBar: AppBar(title: Text('login.title'.tr())), 
       body: Padding(
@@ -270,7 +344,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     child: _isLoading 
                       ? const CircularProgressIndicator(color: Colors.white) 
                       : Text(_lockoutTime != null 
-                          ? "Locked (${_lockoutTime!.difference(DateTime.now()).inMinutes + 1}m)" 
+                          ? "Locked (${lockedMinutes}m)" 
                           : 'login.btn_login'.tr()),
                   ),
                 ),
